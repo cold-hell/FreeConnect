@@ -1,0 +1,28 @@
+# Сборка
+build/
+dist/
+installer/Output/
+*.spec.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Логи / временное
+*.log
+*.zip
+FreeConnect-логи-*.zip
+
+# Среда / IDE
+.claude/
+.idea/
+.vscode/
+*.tmp
+Thumbs.db
+
+# Бинарники рантайма (winws/WinDivert) не храним в репозитории —
+# provision из bundled runtime при первом запуске / берутся из zapret.
+runtime/

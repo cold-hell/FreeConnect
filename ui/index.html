@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FreeConnect</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="aurora"></div>
+<div class="grain"></div>
+<canvas id="fx" class="fx"></canvas>
+
+<!-- Сплэш-загрузка: молния заряжается под стартовую автоматизацию -->
+<div class="splash" id="splash">
+  <div class="splash-inner">
+    <svg class="splash-bolt" viewBox="0 0 24 24" aria-hidden="true">
+      <defs>
+        <linearGradient id="schg" x1="0" y1="1" x2="0" y2="0">
+          <stop offset="0" stop-color="#37e0c4"/><stop offset="1" stop-color="#8fb0ff"/>
+        </linearGradient>
+        <clipPath id="splashClip"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></clipPath>
+      </defs>
+      <path class="sb-base" d="M7 2v11h3v9l7-12h-4l4-8z"/>
+      <g clip-path="url(#splashClip)"><rect class="sb-fill" id="splashFill" x="0" y="0" width="24" height="24" fill="url(#schg)"/></g>
+      <path class="sb-stroke" d="M7 2v11h3v9l7-12h-4l4-8z"/>
+    </svg>
+    <div class="splash-name">FreeConnect</div>
+    <div class="splash-pct" id="splashPct">0%</div>
+    <div class="splash-step" id="splashStep">запуск…</div>
+  </div>
+</div>
+
+<!-- Сквозная полоса-заголовок: тащим окно за весь верх (даже над логотипом и поверх оверлеев) -->
+<div class="titlebar-drag pywebview-drag-region"></div>
+<!-- Кнопки окна — отдельным слоем поверх полосы -->
+<div class="win-controls" id="winControls">
+  <button class="icon-btn" id="winMin" title="Свернуть">
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none"><path stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M6 12h12"/></svg>
+  </button>
+  <button class="icon-btn win-close" id="winClose" title="Свернуть в трей">
+    <svg viewBox="0 0 24 24" width="16" height="16" fill="none"><path stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M6 6l12 12M18 6L6 18"/></svg>
+  </button>
+</div>
+
+<main class="app">
+  <!-- Шапка (только бренд; перетаскивание и кнопки окна — отдельными слоями) -->
+  <header class="topbar">
+    <div class="brand">
+      <svg class="logo-bolt" viewBox="0 0 24 24" aria-hidden="true">
+        <defs><linearGradient id="lgrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" class="ls1"/><stop offset="1" class="ls2"/>
+        </linearGradient></defs>
+        <path d="M7 2v11h3v9l7-12h-4l4-8z" fill="url(#lgrad)"/>
+      </svg>
+      <div class="brand-text">
+        <div class="brand-name">FreeConnect</div>
+        <div class="brand-sub" id="brandSub">свобода связи</div>
+      </div>
+    </div>
+    <button class="icon-btn" id="settingsBtn" title="Настройки">
+      <svg viewBox="0 0 24 24" width="18" height="18"><path fill="currentColor" d="M12 8a4 4 0 1 0 0 8 4 4 0 0 0 0-8zm9.4 4a7.6 7.6 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7.6 7.6 0 0 0-2-1.2l-.4-2.6H9.5l-.4 2.6a7.6 7.6 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6a7.7 7.7 0 0 0 0 2.4l-2 1.6 2 3.4 2.4-1c.6.5 1.3.9 2 1.2l.4 2.6h4.9l.4-2.6c.7-.3 1.4-.7 2-1.2l2.4 1 2-3.4-2-1.6c.1-.4.1-.8.1-1.2z"/></svg>
+    </button>
+  </header>
+
+  <!-- Баннер обновления приложения (скрыт, показывается если есть новая версия) -->
+  <div class="update-banner" id="updateBanner" hidden>
+    <span class="ub-text" id="updateText">Доступно обновление</span>
+    <button class="ub-btn" id="updateBtn">Обновить</button>
+    <button class="ub-close" id="updateClose" title="Скрыть">✕</button>
+  </div>
+
+  <!-- Центр: главная кнопка -->
+  <section class="hero">
+    <div class="power" id="power">
+      <div class="shock" id="shock"></div>
+      <div class="ring ring-outer"></div>
+      <div class="ring ring-mid"></div>
+      <div class="ring ring-inner"></div>
+      <button class="power-btn" id="powerBtn">
+        <svg class="bolt" viewBox="0 0 24 24" aria-hidden="true">
+          <defs>
+            <linearGradient id="chg" x1="0" y1="1" x2="0" y2="0">
+              <stop offset="0" stop-color="#37e0c4"/>
+              <stop offset="0.55" stop-color="#7fe8d6"/>
+              <stop offset="1" stop-color="#8fb0ff"/>
+            </linearGradient>
+            <clipPath id="boltClip"><path d="M7 2v11h3v9l7-12h-4l4-8z"/></clipPath>
+            <linearGradient id="flow" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" stop-color="rgba(255,255,255,0)"/>
+              <stop offset="0.5" stop-color="rgba(255,255,255,.6)"/>
+              <stop offset="1" stop-color="rgba(255,255,255,0)"/>
+            </linearGradient>
+          </defs>
+          <path class="bolt-base" d="M7 2v11h3v9l7-12h-4l4-8z"/>
+          <g clip-path="url(#boltClip)"><rect class="bolt-fill" x="0" y="0" width="24" height="24" fill="url(#chg)"/></g>
+          <g clip-path="url(#boltClip)"><rect class="bolt-flow" x="0" y="0" width="24" height="8" fill="url(#flow)"/></g>
+          <path class="bolt-stroke" d="M7 2v11h3v9l7-12h-4l4-8z"/>
+        </svg>
+        <span class="power-word" id="powerWord">OFF</span>
+      </button>
+    </div>
+    <div class="status-line" id="statusLine">Обход выключен</div>
+  </section>
+
+  <!-- Статусы сервисов -->
+  <section class="statuses" id="statuses">
+    <div class="chip" data-svc="discord">
+      <div class="chip-icon discord">
+        <svg viewBox="0 0 24 24" width="20" height="20"><path fill="#fff" d="M20.317 4.369A19.79 19.79 0 0 0 16.885 3.3a.074.074 0 0 0-.079.037c-.34.607-.719 1.4-.984 2.02a18.27 18.27 0 0 0-5.487 0 12.6 12.6 0 0 0-.997-2.02.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.369a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128c.126-.094.252-.192.372-.291a.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.009c.12.099.246.198.373.292a.077.077 0 0 1-.006.127 12.3 12.3 0 0 1-1.873.891.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.055c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.331c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
+      </div>
+      <div class="chip-body">
+        <div class="chip-name">Discord</div>
+        <div class="chip-state" id="stDiscord">—</div>
+      </div>
+      <div class="chip-dot" id="dotDiscord"></div>
+    </div>
+    <div class="chip" data-svc="youtube">
+      <div class="chip-icon youtube">
+        <svg viewBox="0 0 24 24" width="22" height="22"><path fill="#fff" d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/></svg>
+      </div>
+      <div class="chip-body">
+        <div class="chip-name">YouTube</div>
+        <div class="chip-state" id="stYoutube">—</div>
+      </div>
+      <div class="chip-dot" id="dotYoutube"></div>
+    </div>
+    <div class="chip" data-svc="voice">
+      <div class="chip-icon voice">
+        <svg viewBox="0 0 24 24" width="18" height="18"><path fill="#fff" d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V22h2v-3.08A7 7 0 0 0 19 12h-2z"/></svg>
+      </div>
+      <div class="chip-body">
+        <div class="chip-name">Голос Discord</div>
+        <div class="chip-state" id="stVoice">пинг —</div>
+      </div>
+      <div class="chip-dot" id="dotVoice"></div>
+    </div>
+  </section>
+
+  <!-- Панель стратегии -->
+  <section class="strategy-panel">
+    <div class="strategy-current">
+      <span class="sp-label">Стратегия</span>
+      <span class="sp-value" id="currentStrategy">не выбрана</span>
+    </div>
+    <div class="strategy-actions">
+      <button class="btn ghost" id="pickBtn">Выбрать вручную</button>
+      <button class="btn primary" id="searchBtn">
+        <svg viewBox="0 0 24 24" width="16" height="16"><path fill="currentColor" d="M12 2a10 10 0 1 0 10 10h-2a8 8 0 1 1-8-8V2z"/></svg>
+        Подобрать автоматически
+      </button>
+    </div>
+    <button class="btn deep" id="deepBtn">
+      <svg viewBox="0 0 24 24" width="15" height="15"><path fill="currentColor" d="M13 2 4.5 13H11l-1 9 8.5-11H12l1-9z"/></svg>
+      Глубокий поиск — создать свою стратегию
+    </button>
+  </section>
+</main>
+
+<!-- Оверлей поиска -->
+<div class="overlay" id="searchOverlay">
+  <div class="scanner">
+    <div class="radar" id="radar">
+      <div class="radar-sweep"></div>
+      <div class="radar-grid"></div>
+      <div class="radar-core"></div>
+      <div class="radar-ping" id="radarPing"></div>
+    </div>
+    <canvas id="forge" class="forge-canvas" width="200" height="200"></canvas>
+    <div class="scan-title" id="scanTitle">Подбираю стратегию под твоего провайдера</div>
+    <div class="scan-current" id="scanCurrent">инициализация…</div>
+    <div class="progress"><div class="progress-bar" id="progressBar"></div></div>
+    <div class="scan-count" id="scanCount">0 / 0</div>
+    <div class="found-list" id="foundList"></div>
+    <button class="btn ghost small" id="cancelSearchBtn">Отменить</button>
+  </div>
+</div>
+
+<!-- Модалка выбора стратегии -->
+<div class="modal" id="pickModal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div class="modal-title">Рабочие стратегии</div>
+      <button class="icon-btn" id="closePick">✕</button>
+    </div>
+    <div class="modal-body" id="strategyList"></div>
+  </div>
+</div>
+
+<!-- Модалка настроек -->
+<div class="modal" id="settingsModal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div class="modal-title">Настройки</div>
+      <button class="icon-btn" id="closeSettings">✕</button>
+    </div>
+    <div class="modal-body">
+      <label class="toggle-row">
+        <span>Запускать при старте Windows</span>
+        <span class="switch"><input type="checkbox" id="optAutostart"><span class="slider"></span></span>
+      </label>
+      <label class="toggle-row">
+        <span>Покрывать игровой трафик<small class="toggle-sub">обход и для игр (порты 1024-65535). Включай, если играешь</small></span>
+        <span class="switch"><input type="checkbox" id="optGameFilter"><span class="slider"></span></span>
+      </label>
+      <label class="toggle-row">
+        <span>Следить за пингом голосового и авто-восстанавливать</span>
+        <span class="switch"><input type="checkbox" id="optMonitor" checked><span class="slider"></span></span>
+      </label>
+      <button class="btn ghost" id="replayTour" style="width:100%;margin-top:8px">Показать обучение снова</button>
+      <button class="btn ghost" id="sendLogs" style="width:100%;margin-top:8px">Собрать логи для поддержки</button>
+      <div class="settings-note" id="logsNote">winws.exe часто ложно определяется антивирусом — это нормально для обхода блокировок.</div>
+      <div class="settings-foot">
+        <span id="appVersion">FreeConnect</span>
+        <button class="link-btn" id="checkUpdate">Проверить обновления</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Онбординг-тур (только при первом запуске) -->
+<div class="tour" id="tour">
+  <div class="tour-highlight" id="tourHi"></div>
+  <div class="tour-pop" id="tourPop">
+    <div class="tour-text" id="tourText"></div>
+    <div class="tour-progress" id="tourProg"></div>
+    <div class="tour-actions">
+      <button class="tour-skip" id="tourSkip">Пропустить</button>
+      <button class="tour-next" id="tourNext">Далее</button>
+    </div>
+  </div>
+</div>
+
+<script src="fx.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
