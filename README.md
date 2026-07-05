@@ -8,6 +8,9 @@ Discord и YouTube снова работают — без настроек, ба
 [![Скачать](https://img.shields.io/badge/⬇_Скачать-FreeConnect_Setup-37e0c4?style=for-the-badge)](https://github.com/adolfloves/FreeConnect/releases/latest)
 [![Version](https://img.shields.io/github/v/release/adolfloves/FreeConnect?style=for-the-badge&color=6b8cff&label=версия)](https://github.com/adolfloves/FreeConnect/releases/latest)
 
+[![tests](https://github.com/adolfloves/FreeConnect/actions/workflows/tests.yml/badge.svg)](https://github.com/adolfloves/FreeConnect/actions/workflows/tests.yml)
+[![license](https://img.shields.io/github/license/adolfloves/FreeConnect?color=37e0c4)](LICENSE)
+
 </div>
 
 ---
