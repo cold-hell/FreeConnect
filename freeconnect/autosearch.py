@@ -79,7 +79,11 @@ def _compute_score(sc: StrategyScore, n_services: int) -> None:
     sc.working = sc.services_ok > 0
     lat = sc.avg_latency_ms
     lat_penalty = (lat / 10.0) if lat >= 0 else 100.0
-    sc.score = sc.services_ok * 1000 + sc.sites_ok * 100 - lat_penalty
+    # Штраф за качество голоса: среди равных (напр. двух All) выше встанет та, что
+    # коннектится к войсу быстрее/стабильнее (меньше потерь/джиттера/RTT). Всегда
+    # меньше разрыва между All и Discord-only (services_ok*1000), порядок не ломает.
+    voice_penalty = sum(s.voice_score() for s in sc.services)
+    sc.score = sc.services_ok * 1000 + sc.sites_ok * 100 - lat_penalty - voice_penalty
 
 
 def evaluate_strategy(

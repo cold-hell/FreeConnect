@@ -69,8 +69,18 @@ class ServiceResult:
     # голосом — ровно тот баг, что ловил пользователь.
     voice_ok: bool | None = None
     voice_rtt: float = -1.0
+    voice_loss: float = 0.0   # доля потерянных мелких проб 0..1 (предиктор долгого коннекта)
+    voice_jitter: float = 0.0 # разброс RTT, мс (нестабильность → рвущийся/долгий коннект)
     voice_conf: str = ""      # "high" | "low" — уверенность авто-проверки голоса
     voice_detail: str = ""    # человекочитаемые метрики (loss/jitter/big) для логов
+
+    def voice_score(self) -> float:
+        """Штраф качества голоса (меньше = лучше/быстрее коннектится). Только для
+        живого голоса; потери весят больше всего — именно они дают долгий вход в войс."""
+        if not self.voice_ok:
+            return 0.0
+        rtt = self.voice_rtt if self.voice_rtt > 0 else 300.0
+        return rtt * 0.1 + self.voice_loss * 300.0 + self.voice_jitter * 0.3
 
     @property
     def sites_ok(self) -> bool:
@@ -305,6 +315,8 @@ def check_voice(attempts: int = 5, timeout: float = 1.6) -> ServiceResult:
     big_ok = len(big_rtts) >= 1
 
     out.voice_rtt = best
+    out.voice_loss = round(loss, 3)
+    out.voice_jitter = jitter
     small_ok = loss <= VOICE_LOSS_MAX and best <= VOICE_RTT_MAX_MS
     out.voice_ok = bool(small_ok and big_ok)
     # Уверенность: high — сигнал чёткий; low — пограничный (тут уместен опц. ручной чек).
@@ -339,6 +351,8 @@ def test_service(
         vc = check_voice(timeout=min(1.6, timeout))
         result.voice_ok = vc.voice_ok
         result.voice_rtt = vc.voice_rtt
+        result.voice_loss = vc.voice_loss
+        result.voice_jitter = vc.voice_jitter
         result.voice_conf = vc.voice_conf
         result.voice_detail = vc.voice_detail
     return result

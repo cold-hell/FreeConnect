@@ -485,9 +485,22 @@ function renderUpdate(){
     banner.hidden=true;
   }
 }
-if($("#updateBtn")) $("#updateBtn").onclick=()=>{
-  const u=(state&&state.update)||{};
-  if(u.url && api().open_url) api().open_url(u.url);
+function _manualUpdate(u){ if(u&&u.url&&api().open_url) api().open_url(u.url); }
+if($("#updateBtn")) $("#updateBtn").onclick=async()=>{
+  const u=(state&&state.update)||{}, btn=$("#updateBtn");
+  btn.disabled=true; btn.textContent="Обновляю…";
+  try{
+    // Тихое автообновление: скачает и поставит поверх, приложение перезапустится.
+    const r = api().install_update ? await api().install_update() : null;
+    if(r && r.ok){ return; }         // пойдёт установка и перезапуск — оставляем "Обновляю…"
+    _manualUpdate(u);                // нет тихого пути — открываем ручное скачивание
+  }catch(e){ _manualUpdate(u); }
+  btn.disabled=false; btn.textContent="Обновить";
+};
+// Тихое обновление не удалось (сеть/запуск) — предлагаем ручное скачивание.
+window.onUpdateError=(msg)=>{
+  const btn=$("#updateBtn"); if(btn){ btn.disabled=false; btn.textContent="Обновить"; }
+  _manualUpdate((state&&state.update)||{});
 };
 if($("#updateClose")) $("#updateClose").onclick=()=>{ _updateDismissed=true; $("#updateBanner").hidden=true; };
 if($("#checkUpdate")) $("#checkUpdate").onclick=async()=>{

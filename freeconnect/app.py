@@ -421,6 +421,39 @@ class Api:
         except Exception as e:  # noqa: BLE001
             _log(f"open_url failed: {e}")
 
+    def install_update(self) -> dict:
+        """Тихое автообновление: качает установщик и ставит поверх БЕЗ запроса UAC
+        (мы уже под админом) и БЕЗ диалогов. Приложение само закроется, освободив
+        файлы, а установщик после установки перезапустит его ([Run] без skipifsilent).
+        Возвращает {ok} сразу; работа идёт в фоне, статус — через события."""
+        url = (self._update_info or {}).get("url", "")
+        if not (url.startswith(("http://", "https://")) and url.lower().endswith(".exe")):
+            return {"ok": False, "error": "нет прямой ссылки на установщик"}
+        threading.Thread(target=self._do_install_update, args=(url,), daemon=True).start()
+        return {"ok": True}
+
+    def _do_install_update(self, url: str) -> None:
+        import shutil as _sh
+        import tempfile
+        import urllib.request
+        try:
+            tmp = Path(tempfile.gettempdir()) / "FreeConnect-Setup-update.exe"
+            req = urllib.request.Request(url, headers={"User-Agent": "FreeConnect"})
+            with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
+                _sh.copyfileobj(r, f)
+            _log(f"update downloaded -> {tmp} ({tmp.stat().st_size} b)")
+            # DETACHED_PROCESS|CREATE_NEW_PROCESS_GROUP — установщик переживёт наш выход.
+            flags = 0x00000008 | 0x00000200
+            subprocess.Popen(
+                [str(tmp), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NOCANCEL", "/NORESTART"],
+                creationflags=flags, close_fds=True)
+            _log("update installer launched (silent) -> закрываюсь для замены файлов")
+            time.sleep(1.5)          # даём установщику проинициализироваться
+            self._tray_quit()        # освобождаем FreeConnect.exe; установщик перезапустит
+        except Exception as e:  # noqa: BLE001
+            _log(f"install_update failed: {e}")
+            self._push("onUpdateError", str(e))
+
     def get_startup_progress(self) -> dict:
         return self._diag_progress or {"i": 0, "total": 6, "pct": 0,
                                        "label": "", "status": None, "detail": "", "done": False}
@@ -692,8 +725,9 @@ class Api:
         names = {w["name"] for w in working}
         self.working = working + [w for w in self.working if w["name"] not in names]
         if working:
-            # Ставим по умолчанию лучшую (Discord+YouTube), а не просто первую.
-            self.strategy_name = self._best_strategy_name() or working[0]["name"]
+            # working отсортирован по баллу (services_ok, затем качество голоса) —
+            # working[0] это лучшая All с самым быстрым/стабильным голосом.
+            self.strategy_name = working[0]["name"]
             self._save()
             self.enable()
         self._searching = False
@@ -732,7 +766,8 @@ class Api:
         working = [_score_to_item(r) for r in results if r.working]
         self.working = working
         if working:
-            self.strategy_name = self._best_strategy_name() or working[0]["name"]
+            # results отсортированы по баллу (голос учтён) → working[0] = лучшая.
+            self.strategy_name = working[0]["name"]
             self._save()
             # Применяем лучшую стратегию сразу.
             self.enable()
