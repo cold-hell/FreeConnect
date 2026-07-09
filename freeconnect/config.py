@@ -10,10 +10,11 @@ DEFAULTS: dict[str, Any] = {
     "strategy": None,       # id выбранной стратегии
     "working": [],          # последний список рабочих стратегий (для быстрого выбора)
     "autostart": False,     # автозапуск при старте Windows
-    "monitor": True,        # мониторинг пинга голосового + авто-восстановление
+    "monitor": True,        # мониторинг голоса (UDP) + доступности Discord/YouTube (TCP), авто-восстановление
     "auto_enable": True,    # включать обход сразу при запуске приложения
     "onboarded": False,     # обучение уже пройдено (иначе localStorage стирается WebView2)
     "game_filter": False,   # покрывать игровой трафик (порты 1024-65535) — для игр
+    "doh": False,           # DNS-over-HTTPS: шифровать DNS, обходить DNS-подмену (опция)
     "strategies_updated_at": 0,  # unixtime последнего автообновления стратегий из upstream
 }
 

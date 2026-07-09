@@ -370,6 +370,13 @@ window.onVoiceSpike=()=>{
   const d=$("#dotVoice"); d.classList.add("warn");
   $("#stVoice").textContent="скачок пинга…";
 };
+window.onServiceDegraded=(info)=>{
+  // Watchdog заметил, что сервис перестал открываться — подсветим и покажем восстановление.
+  const svc=(info&&info.service)||"";
+  const map={discord:["#dotDiscord","#stDiscord"], youtube:["#dotYoutube","#stYoutube"]};
+  const sel=map[svc];
+  if(sel){ const d=$(sel[0]); if(d) d.classList.add("warn"); const s=$(sel[1]); if(s) s.textContent="проверяю…"; }
+};
 window.onRecovering=()=>{
   statusLine.textContent="Восстанавливаю соединение…";
   $("#stVoice").textContent="восстановление…";
@@ -392,6 +399,7 @@ async function loadSettings(){
     $("#optAutostart").checked=!!s.autostart;
     $("#optMonitor").checked=s.monitor!==false;
     if($("#optGameFilter")) $("#optGameFilter").checked=!!s.game_filter;
+    if($("#optDoh")) $("#optDoh").checked=!!s.doh;
   }catch(e){}
 }
 function wireSetting(id,key){
@@ -401,6 +409,13 @@ function wireSetting(id,key){
 wireSetting("#optAutostart","autostart");
 wireSetting("#optMonitor","monitor");
 wireSetting("#optGameFilter","game_filter");
+wireSetting("#optDoh","doh");
+// Отражаем реальный результат включения DoH (смена DNS идёт в фоне и может не удаться).
+window.onDohState=(ok)=>{
+  const el=$("#optDoh"); if(el) el.checked=!!ok;
+  const note=$("#dohNote"); if(note) note.style.display = ok ? "none" : "block";
+  if(!ok && api().set_setting) api().set_setting("doh", false);
+};
 
 // ---------- События ----------
 powerBtn.onclick=togglePower;

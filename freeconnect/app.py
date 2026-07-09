@@ -21,6 +21,8 @@ from . import __version__, config, paths, tester
 from .autosearch import StrategyScore, search
 from .engine import Engine, EngineError, is_admin
 from .monitor import VoiceMonitor
+from .watchdog import ServiceWatchdog
+from .doh import DoHManager
 from .strategies import Strategy, load_strategies
 
 
@@ -128,6 +130,14 @@ class Api:
         self.monitor = VoiceMonitor(
             on_update=None, on_spike=self._on_voice_spike
         )
+        # Watchdog доступности Discord/YouTube по TCP/TLS — дополняет голосовой монитор
+        # (UDP). Деградация сервиса -> тот же авто-ремонт, что и всплеск голоса.
+        self.watchdog = ServiceWatchdog(
+            services_provider=lambda: ["discord", "youtube"],
+            on_degraded=self._on_watchdog_degraded,
+        )
+        # DNS-over-HTTPS (опция, по умолчанию выкл): шифрует DNS, обходит DNS-подмену.
+        self.doh = DoHManager(log=_log)
         self._searching = False
         self._recovering = False
         self._last_recovery = 0.0
@@ -545,7 +555,8 @@ class Api:
     def _tray_quit(self) -> None:
         self._really_quit = True
         try:
-            self.monitor.stop()
+            self._stop_monitors()
+            self._stop_doh()   # синхронно: вернуть DNS адаптера ДО выхода
             self.engine.stop()
         except Exception:
             pass
@@ -581,10 +592,11 @@ class Api:
             "monitor": self.cfg.get("monitor", True),
             "auto_enable": self.cfg.get("auto_enable", True),
             "game_filter": self.cfg.get("game_filter", False),
+            "doh": self.cfg.get("doh", False),
         }
 
     def set_setting(self, key: str, value) -> dict:
-        if key not in ("autostart", "monitor", "auto_enable", "game_filter"):
+        if key not in ("autostart", "monitor", "auto_enable", "game_filter", "doh"):
             return self.get_settings()
         val = bool(value)
         if key == "autostart":
@@ -606,6 +618,12 @@ class Api:
         if key == "game_filter" and self.enabled:
             _log(f"game_filter -> {val}: перезапуск обхода")
             self.enable()
+        # DoH включаем/выключаем сразу (смена DNS адаптера идёт в фоне, чтобы не тормозить UI).
+        if key == "doh":
+            if val and self.enabled:
+                self._start_doh_async()
+            elif not val:
+                threading.Thread(target=self._stop_doh, daemon=True).start()
         return self.get_settings()
 
     def enable(self) -> dict:
@@ -617,8 +635,8 @@ class Api:
         try:
             self.engine.start(strat)
             self.enabled = True
-            if self.cfg.get("monitor", True):
-                self.monitor.start()
+            self._start_monitors()
+            self._start_doh_async()
         except EngineError as e:
             self.enabled = False
             self._push("onError", str(e))
@@ -627,7 +645,8 @@ class Api:
         return self._state()
 
     def disable(self) -> dict:
-        self.monitor.stop()
+        self._stop_monitors()
+        threading.Thread(target=self._stop_doh, daemon=True).start()  # откат DNS в фоне
         self.engine.stop()
         self.enabled = False
         if self.tray:
@@ -704,7 +723,7 @@ class Api:
 
     def _run_deep(self) -> None:
         from . import deepsearch
-        self.monitor.stop()
+        self._stop_monitors()
         # База для мутаций: текущая стратегия -> лучшая рабочая -> ALT -> первая встроенная.
         base_name = self.strategy_name or (self.working[0]["name"] if self.working else None)
         base = (self._find_strategy(base_name) if base_name else None) or self._find_strategy("ALT")
@@ -765,8 +784,8 @@ class Api:
 
     # ---- внутреннее: поиск ----
     def _run_search(self) -> None:
-        # На время поиска гасим монитор/обход.
-        self.monitor.stop()
+        # На время поиска гасим мониторы/обход.
+        self._stop_monitors()
         counter = {"i": 0}
 
         def on_progress(i, total, strat):
@@ -804,26 +823,66 @@ class Api:
         self._searching = False
         self._push("onSearchDone", working)
 
-    # ---- монитор ----
+    # ---- мониторы (голос по UDP + доступность сервисов по TCP/TLS) ----
+    def _start_monitors(self) -> None:
+        if self.cfg.get("monitor", True):
+            self.monitor.start()
+            self.watchdog.start()
+
+    def _stop_monitors(self) -> None:
+        self.monitor.stop()
+        self.watchdog.stop()
+
+    def _start_doh_async(self) -> None:
+        """Поднять DoH в фоне (смена DNS через PowerShell занимает ~1с — не тормозим UI)."""
+        if not self.cfg.get("doh", False):
+            return
+        def go() -> None:
+            try:
+                ok = self.doh.start()
+                self._push("onDohState", bool(ok))
+                if not ok:
+                    _log("DoH не удалось включить (см. выше)")
+            except Exception as e:  # noqa: BLE001
+                _log(f"doh start error: {e}")
+                self._push("onDohState", False)
+        threading.Thread(target=go, daemon=True).start()
+
+    def _stop_doh(self) -> None:
+        try:
+            self.doh.stop()
+        except Exception as e:  # noqa: BLE001
+            _log(f"doh stop error: {e}")
+
     def _on_voice_update(self, rtt) -> None:
         self._push("onVoiceUpdate", rtt)
 
     def _on_voice_spike(self) -> None:
         # Пинг голосового скакнул / потеря пакетов — уведомляем UI и восстанавливаем.
         self._push("onVoiceSpike")
+        self._trigger_recovery("voice spike")
+
+    def _on_watchdog_degraded(self, service: str, status: str) -> None:
+        # Сервис (Discord/YouTube) устойчиво не открывается по TCP/TLS — тот же авто-ремонт.
+        self._push("onServiceDegraded", {"service": service, "status": status})
+        self._trigger_recovery(f"watchdog: {service} {status}")
+
+    def _trigger_recovery(self, reason: str) -> None:
+        """Единая точка авто-восстановления для голосового монитора и watchdog:
+        общий cooldown и счётчик попыток, чтобы источники не били одновременно."""
         if not (self.enabled and self.cfg.get("monitor", True)):
-            _log("voice spike, но восстановление off (enabled/monitor)")
+            _log(f"{reason}, но восстановление off (enabled/monitor)")
             return
         now = time.monotonic()
         if self._recovering or (now - self._last_recovery) < self.recovery_cooldown:
             return
-        # Если проблем давно не было — считаем голос здоровым, сбрасываем счётчик.
+        # Если проблем давно не было — считаем путь здоровым, сбрасываем счётчик.
         if now - self._last_recovery > self.recover_reset_after:
             self._recover_count = 0
         self._recovering = True
         self._last_recovery = now
         self._recover_count += 1
-        _log(f"voice spike -> recovery attempt #{self._recover_count}")
+        _log(f"{reason} -> recovery attempt #{self._recover_count}")
         threading.Thread(target=self._recover, daemon=True).start()
 
     def _recover(self) -> None:

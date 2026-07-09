@@ -209,9 +209,14 @@
         <span class="switch"><input type="checkbox" id="optGameFilter"><span class="slider"></span></span>
       </label>
       <label class="toggle-row">
-        <span>Следить за пингом голосового и авто-восстанавливать</span>
+        <span>Следить за доступностью и авто-восстанавливать<small class="toggle-sub">проверяет голос, Discord и YouTube — при ухудшении связи сам переключит стратегию</small></span>
         <span class="switch"><input type="checkbox" id="optMonitor" checked><span class="slider"></span></span>
       </label>
+      <label class="toggle-row">
+        <span>Шифровать DNS (DNS-over-HTTPS)<small class="toggle-sub">провайдер не видит и не подменяет DNS-запросы. Включи, если сайт не открывается даже с обходом</small></span>
+        <span class="switch"><input type="checkbox" id="optDoh"><span class="slider"></span></span>
+      </label>
+      <div class="settings-note" id="dohNote" style="display:none;color:#ff8a6a">Не удалось включить DNS-over-HTTPS — проверь интернет и что порт 53 свободен.</div>
       <button class="btn ghost" id="replayTour" style="width:100%;margin-top:8px">Показать обучение снова</button>
       <button class="btn ghost" id="sendLogs" style="width:100%;margin-top:8px">Собрать логи для поддержки</button>
       <div class="settings-note" id="logsNote">winws.exe часто ложно определяется антивирусом — это нормально для обхода блокировок.</div>
