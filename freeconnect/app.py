@@ -20,12 +20,13 @@ try:
 except ImportError:   # pywebview нужен только в рантайме GUI (create_window/start);
     webview = None    # для юнит-тестов/CI без GUI-зависимости модуль импортируется и так
 
-from . import __version__, config, paths, tester
+from . import __version__, config, paths, tester, vpn
 from .autosearch import StrategyScore, search
 from .engine import Engine, EngineError, is_admin
 from .monitor import VoiceMonitor
 from .watchdog import ServiceWatchdog
 from .doh import DoHManager
+from .singbox import SingBox, SingBoxError
 from .strategies import Strategy, load_strategies
 
 
@@ -46,9 +47,13 @@ def _provision_runtime() -> None:
     Нужно для собранного .exe у друзей: у них нет заранее подготовленного рантайма,
     а держать его надо в пути без кириллицы (иначе winws/WinDivert ломаются).
     """
-    if paths.runtime_ready():
-        return
     src = _bundle_base() / "runtime"
+    if paths.runtime_ready():
+        # Рантайм уже развёрнут (обновление поверх): полное копирование пропускаем,
+        # но ДОКИДЫВАЕМ новые файлы бандла (напр. sing-box.exe для VPN), иначе фича
+        # не появится у тех, кто ставит апдейт поверх готового C:\FreeConnect\runtime.
+        _provision_missing(src)
+        return
     if not src.is_dir():
         _log(f"provision: встроенный рантайм не найден ({src})")
         return
@@ -65,6 +70,28 @@ def _provision_runtime() -> None:
         except Exception as e:  # noqa: BLE001
             _log(f"provision copy failed {item.name}: {e}")
     _log(f"runtime provisioned -> {paths.RUNTIME_DIR} (ready={paths.runtime_ready()})")
+
+
+def _provision_missing(src: Path) -> None:
+    """Докидывает в уже развёрнутый рантайм только ОТСУТСТВУЮЩИЕ файлы из бандла
+    (напр. новый sing-box.exe при обновлении поверх). Существующие не трогаем —
+    иначе затёрли бы санитайзенные от BOM списки и вернули бы старые бинарники."""
+    if not src.is_dir():
+        return
+    import shutil
+    for root, _dirs, files in os.walk(src):
+        rel = Path(root).relative_to(src)
+        dst_dir = paths.RUNTIME_DIR / rel
+        for name in files:
+            dst = dst_dir / name
+            if dst.exists():
+                continue
+            try:
+                dst_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(Path(root) / name, dst)
+                _log(f"provision: докинут {rel / name}")
+            except Exception as e:  # noqa: BLE001
+                _log(f"provision add failed {name}: {e}")
 
 
 def _sanitize_lists() -> None:
@@ -214,6 +241,17 @@ class Api:
         )
         # DNS-over-HTTPS (опция, по умолчанию выкл): шифрует DNS, обходит DNS-подмену.
         self.doh = DoHManager(log=_log)
+        # VPN-для-Discord: движок sing-box + разобранный список серверов из подписки.
+        # Best-effort и полностью отдельно от winws (см. singbox.py). Серверы восстанавливаем
+        # из кэша конфига при старте, чтобы список был доступен без повторного импорта.
+        self.singbox = SingBox(log=_log)
+        self._vpn_servers: list = []
+        try:
+            cached = self.cfg.get("vpn_config", "")
+            if cached:
+                self._vpn_servers = vpn.parse_servers(cached)
+        except Exception as e:  # noqa: BLE001
+            _log(f"vpn: не разобрал кэш подписки: {e}")
         # Пассивный детектор голоса (эксперим., по умолчанию выкл): наблюдает реальный
         # медиапоток Discord через WinDivert SNIFF и ловит односторонний/мёртвый голос,
         # который STUN-монитор и watchdog не видят. Best-effort: сбой не рушит обход.
@@ -340,6 +378,7 @@ class Api:
             "onboarded": bool(self.cfg.get("onboarded", False)),
             "update": dict(self._update_info),
             "version": __version__,
+            "vpn_on": self.singbox.is_running(),  # для бейджа «Discord через VPN» на главном
         }
 
     def _save(self) -> None:
@@ -474,6 +513,14 @@ class Api:
                     _log(f"autoconnect attempt {attempt} failed")
                     time.sleep(4)
                 _log(f"autoconnect: enabled={self.enabled}")
+            # VPN-для-Discord: если пользователь оставил туннель включённым (A1 —
+            # держим, пока сам не выключит), поднимаем его при старте. Best-effort:
+            # нет бинарника/серверов/прав — просто пропускаем, обход winws не страдает.
+            if self.cfg.get("vpn_enabled") and self.singbox.available() and self._vpn_servers:
+                _log("autoconnect: восстанавливаю VPN-туннель для Discord")
+                res = self.vpn_set_enabled(True)
+                if not res.get("ok"):
+                    _log(f"autoconnect vpn: {res.get('error', 'не поднялся')}")
         except Exception as e:  # noqa: BLE001
             _log(f"diag finish err: {e}")
         p = dict(self._diag_progress)
@@ -664,6 +711,7 @@ class Api:
             self._stop_monitors()
             self._stop_doh()   # синхронно: вернуть DNS адаптера ДО выхода
             self.engine.stop()
+            self.singbox.stop()  # снять TUN и маршруты VPN, не осиротить туннель
         except Exception:
             pass
         if self.tray:
@@ -744,6 +792,128 @@ class Api:
                     pass
                 self._voicewatch = None
         return self.get_settings()
+
+    # ---- VPN-для-Discord ----
+    _VPN_PROTO = {"hysteria2": "Hysteria2", "vless-reality": "VLESS-Reality",
+                  "trojan-reality": "Trojan-Reality"}
+
+    def _vpn_country_ru(self, country: str) -> str:
+        return vpn.COUNTRIES.get(country, ("", "Сервер"))[1]
+
+    def _vpn_server_rows(self) -> list:
+        """Список стран для UI: по одной строке на страну (лучший протокол —
+        серверы уже отсортированы Hysteria2→VLESS→Trojan, поэтому берём первый)."""
+        rows, seen = [], set()
+        for s in self._vpn_servers:
+            if s.country in seen:
+                continue
+            seen.add(s.country)
+            rows.append({"id": s.country, "country": s.country,
+                         "name": self._vpn_country_ru(s.country),
+                         "sub": self._VPN_PROTO.get(s.kind, s.kind)})
+        return rows
+
+    def _vpn_title(self, server) -> str:
+        return f"{self._vpn_country_ru(server.country)} · {self._VPN_PROTO.get(server.kind, server.kind)}"
+
+    def vpn_get_state(self) -> dict:
+        return {
+            "available": self.singbox.available(),   # забандлен ли бинарник sing-box
+            "imported": bool(self._vpn_servers),
+            "servers": self._vpn_server_rows(),
+            "selected": self.cfg.get("vpn_country", "") or "auto",
+            "enabled": self.singbox.is_running(),
+            "sub_url": self.cfg.get("vpn_sub_url", ""),
+        }
+
+    def _fetch_subscription(self, url: str) -> str:
+        import urllib.request
+        req = urllib.request.Request(url, headers={"User-Agent": "FreeConnect"})
+        with urllib.request.urlopen(req, timeout=12) as r:  # noqa: S310 (доверенный ввод юзера)
+            return r.read().decode("utf-8", "replace")
+
+    def vpn_import(self, url: str = "", json_text: str = "") -> dict:
+        """Импорт подписки: скачать по ссылке ИЛИ разобрать вставленный JSON.
+        Наполняет список серверов и кэширует его в конфиг."""
+        url = (url or "").strip()
+        json_text = (json_text or "").strip()
+        if json_text:
+            text = json_text
+        elif url:
+            try:
+                text = self._fetch_subscription(url)
+            except Exception as e:  # noqa: BLE001
+                _log(f"vpn: скачать подписку не вышло: {e}")
+                return {**self.vpn_get_state(), "ok": False,
+                        "error": "Не удалось скачать подписку — проверь ссылку и интернет"}
+        else:
+            return {**self.vpn_get_state(), "ok": False, "error": "Вставь ссылку-подписку или конфиг JSON"}
+
+        try:
+            servers = vpn.parse_servers(text)
+        except Exception as e:  # noqa: BLE001
+            _log(f"vpn: не разобрал подписку: {e}")
+            return {**self.vpn_get_state(), "ok": False, "error": "Не разобрал подписку — формат не распознан"}
+        if not servers:
+            return {**self.vpn_get_state(), "ok": False,
+                    "error": "В подписке нет подходящих зарубежных серверов (Hysteria2/VLESS/Trojan)"}
+
+        self._vpn_servers = servers
+        self.cfg["vpn_config"] = text
+        if url:
+            self.cfg["vpn_sub_url"] = url
+        config.save(self.cfg)
+        st = self.vpn_get_state()
+        st["ok"] = True
+        st["message"] = f"Импортировано стран: {len(st['servers'])}"
+        return st
+
+    def vpn_select(self, country: str = "") -> dict:
+        """Выбор страны-выхода ('auto' = лучший по приоритету). Если туннель уже
+        поднят — перезапускаем на новый сервер."""
+        country = (country or "").strip()
+        if country == "auto":
+            country = ""
+        self.cfg["vpn_country"] = country
+        config.save(self.cfg)
+        if self.singbox.is_running():
+            return self.vpn_set_enabled(True)
+        return {**self.vpn_get_state(), "ok": True}
+
+    def vpn_set_enabled(self, on) -> dict:
+        """Включить/выключить туннель. On: строим конфиг под выбранный сервер и
+        запускаем sing-box; Off: гасим. Обход winws при этом не трогаем."""
+        on = bool(on)
+        if not on:
+            try:
+                self.singbox.stop()
+            except Exception as e:  # noqa: BLE001
+                _log(f"vpn stop: {e}")
+            self.cfg["vpn_enabled"] = False
+            config.save(self.cfg)
+            self._push("onVpnState", False)
+            return {**self.vpn_get_state(), "ok": True, "message": "VPN для Discord выключен"}
+
+        if not self._vpn_servers:
+            return {**self.vpn_get_state(), "ok": False, "error": "Сначала импортируй подписку"}
+        country = self.cfg.get("vpn_country", "") or None
+        server = vpn.best_server(self._vpn_servers, country=country)
+        if not server:
+            return {**self.vpn_get_state(), "ok": False, "error": "Нет сервера для выбранной страны"}
+        try:
+            self.singbox.start(vpn.build_singbox_config(server))
+        except SingBoxError as e:
+            return {**self.vpn_get_state(), "ok": False, "error": str(e)}
+        except Exception as e:  # noqa: BLE001
+            _log(f"vpn start: {e}")
+            return {**self.vpn_get_state(), "ok": False, "error": f"Не удалось поднять туннель: {e}"}
+        self.cfg["vpn_enabled"] = True
+        config.save(self.cfg)
+        self._push("onVpnState", True)
+        st = self.vpn_get_state()
+        st["ok"] = True
+        st["message"] = f"Discord идёт через VPN: {self._vpn_title(server)}"
+        return st
 
     def enable(self) -> dict:
         if not self.strategy_name:
@@ -1483,6 +1653,12 @@ def run(argv: list[str] | None = None) -> None:
     # (диагностика: поднялся ли вообще WebView2-мост).
     webview.start(api.on_gui_ready)
     _log("=== webview.start returned (exit) ===")
+    # Страховка на любой путь выхода (в т.ч. закрытие окна без трея): не осиротить
+    # VPN-туннель — снять TUN и маршруты sing-box.
+    try:
+        api.singbox.stop()
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

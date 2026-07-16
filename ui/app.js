@@ -34,6 +34,32 @@ const MockApi = {
     if(!this._state.enabled) return {discord:null,youtube:null,voice:null};
     return {discord:{ok:true,latency:142},youtube:{ok:true,latency:168},voice:{rtt:38}};
   },
+  // VPN-для-Discord (мок для отладки дизайна в браузере — реальная логика в бэкенде).
+  _vpn:{servers:[], selected:"auto", enabled:false},
+  async vpn_get_state(){
+    return {available:false, imported:this._vpn.servers.length>0, servers:this._vpn.servers,
+            selected:this._vpn.selected, enabled:this._vpn.enabled, sub_url:""};
+  },
+  async vpn_import(url, json){
+    if(!url && !json) return {...await this.vpn_get_state(), ok:false, error:"Вставь ссылку или JSON"};
+    this._vpn.servers=[
+      {id:"finland",country:"finland",name:"Финляндия",sub:"Hysteria2"},
+      {id:"germany",country:"germany",name:"Германия",sub:"Hysteria2"},
+      {id:"italy",country:"italy",name:"Италия",sub:"Hysteria2"},
+      {id:"netherlands",country:"netherlands",name:"Нидерланды",sub:"Hysteria2"},
+      {id:"poland",country:"poland",name:"Польша",sub:"VLESS-Reality"},
+      {id:"japan",country:"japan",name:"Япония",sub:"VLESS-Reality"},
+      {id:"france",country:"france",name:"Франция",sub:"Hysteria2"},
+      {id:"united-kingdom",country:"united-kingdom",name:"Великобритания",sub:"VLESS-Reality"},
+    ];
+    return {...await this.vpn_get_state(), ok:true, message:"Импортировано стран: "+this._vpn.servers.length+" (мок)"};
+  },
+  async vpn_select(country){ this._vpn.selected=country==="auto"?"auto":country; return {...await this.vpn_get_state(), ok:true}; },
+  async vpn_set_enabled(on){
+    this._vpn.enabled=!!on;
+    if(window.onVpnState) window.onVpnState(!!on);
+    return {...await this.vpn_get_state(), ok:true, message: on?"Discord идёт через VPN (мок)":"VPN для Discord выключен"};
+  },
   // Имитация поиска: шлём прогресс через глобальные колбэки, как это будет делать бэкенд.
   async start_search(){
     let i=0;
@@ -111,6 +137,8 @@ function renderPower(){
   const vsb=$("#voiceSwitchBtn"); if(vsb) vsb.style.display = state.enabled ? "" : "none";
   // Заряд молнии дотягивается до 100% ровно когда обход активен (или падает до 0)
   setCharge(state.enabled ? 1 : 0, 450);
+  // Бейдж «Discord через VPN» синхронизируем с реальным состоянием туннеля.
+  if(typeof vpnSetBadge==="function") vpnSetBadge(!!state.vpn_on);
 }
 
 let statusBusy=false;
@@ -455,7 +483,6 @@ async function loadSettings(){
     if($("#optGameFilter")) $("#optGameFilter").checked=!!s.game_filter;
     if($("#optDoh")) $("#optDoh").checked=!!s.doh;
     if($("#optVoiceConfirm")) $("#optVoiceConfirm").checked=!!s.voice_confirm;
-    if($("#optVoiceWatch")) $("#optVoiceWatch").checked=!!s.voice_watch;
   }catch(e){}
 }
 function wireSetting(id,key){
@@ -467,7 +494,8 @@ wireSetting("#optMonitor","monitor");
 wireSetting("#optGameFilter","game_filter");
 wireSetting("#optDoh","doh");
 wireSetting("#optVoiceConfirm","voice_confirm");
-wireSetting("#optVoiceWatch","voice_watch");
+// «Авто-восстановление связи» (optMonitor) теперь охватывает и живость голоса —
+// отдельного тумблера voice_watch в UI больше нет (детектор идёт под монитором).
 // Детектор голоса сообщил, что голос односторонний/мёртвый — уведомляем и подсказываем.
 window.onVoiceDead=(info)=>{
   toast("Голос замолчал — чиню. Если не поможет, смени регион голосового канала (Настройки сервера → Регион).", "warn");
@@ -557,6 +585,130 @@ $("#pickBtn").onclick=()=>{ renderStrategyList(state.working||[]); $("#pickModal
 $("#closePick").onclick=()=>$("#pickModal").classList.remove("show");
 $("#settingsBtn").onclick=()=>$("#settingsModal").classList.add("show");
 $("#closeSettings").onclick=()=>$("#settingsModal").classList.remove("show");
+
+// ---------- VPN для Discord (пока КАРКАС: обработчики — заглушки/мок) ----------
+$("#openVpn").onclick=async()=>{ $("#settingsModal").classList.remove("show"); $("#vpnModal").classList.add("show"); await vpnRefresh(); };
+$("#closeVpn").onclick=()=>$("#vpnModal").classList.remove("show");
+$("#vpnPasteJsonBtn").onclick=()=>{
+  const t=$("#vpnJson"); t.style.display = t.style.display==="none" ? "block" : "none";
+  if(t.style.display==="block") t.focus();
+};
+function vpnSetStatus(text, on){
+  $("#vpnStatusText").textContent=text;
+  $("#vpnStatus").classList.toggle("on", !!on);
+}
+
+// Круглые флаги стран рисуем SVG-ом: Windows не рендерит эмодзи-флаги
+// (показывает буквенные пары «FI», «DE»). Квадрат 24×24 обрезается в круг
+// контейнером .vpn-flag (overflow:hidden). Ключи стран = ключи vpn.COUNTRIES.
+const VPN_FLAGS={
+  finland:`<rect width="24" height="24" fill="#fff"/><rect x="7" width="4" height="24" fill="#003580"/><rect y="10" width="24" height="4" fill="#003580"/>`,
+  germany:`<rect width="24" height="8" fill="#000"/><rect y="8" width="24" height="8" fill="#d00"/><rect y="16" width="24" height="8" fill="#ffce00"/>`,
+  netherlands:`<rect width="24" height="8" fill="#ae1c28"/><rect y="8" width="24" height="8" fill="#fff"/><rect y="16" width="24" height="8" fill="#21468b"/>`,
+  poland:`<rect width="24" height="12" fill="#fff"/><rect y="12" width="24" height="12" fill="#dc143c"/>`,
+  japan:`<rect width="24" height="24" fill="#fff"/><circle cx="12" cy="12" r="6" fill="#bc002d"/>`,
+  italy:`<rect width="8" height="24" fill="#009246"/><rect x="8" width="8" height="24" fill="#fff"/><rect x="16" width="8" height="24" fill="#ce2b37"/>`,
+  france:`<rect width="8" height="24" fill="#0055a4"/><rect x="8" width="8" height="24" fill="#fff"/><rect x="16" width="8" height="24" fill="#ef4135"/>`,
+  "united-kingdom":`<rect width="24" height="24" fill="#012169"/><path d="M0,0 L24,24 M24,0 L0,24" stroke="#fff" stroke-width="4"/><path d="M0,0 L24,24 M24,0 L0,24" stroke="#c8102e" stroke-width="2"/><path d="M12,0 V24 M0,12 H24" stroke="#fff" stroke-width="6"/><path d="M12,0 V24 M0,12 H24" stroke="#c8102e" stroke-width="3.5"/>`,
+  // «Авто» и незнакомые страны — приглушённый глобус (как «Авто» в Happ).
+  auto:`<rect width="24" height="24" fill="#1b2233"/><g fill="none" stroke="#8b93ad" stroke-width="1.3"><circle cx="12" cy="12" r="8"/><ellipse cx="12" cy="12" rx="3.6" ry="8"/><path d="M4 12h16M5.6 7.2h12.8M5.6 16.8h12.8"/></g>`,
+};
+function vpnFlag(country){
+  return `<span class="vpn-flag"><svg viewBox="0 0 24 24">${VPN_FLAGS[country]||VPN_FLAGS.auto}</svg></span>`;
+}
+const VPN_CHECK=`<svg class="vpn-srv-check" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>`;
+
+let vpnServers=[];       // список стран-выходов из бэкенда (без строки «Авто»)
+let vpnSelectedId="auto";
+
+// Рисует кастомный список серверов в стиле выбора стратегий (строки-карточки
+// с круглым флагом, кликом выбираем; выбранная подсвечена и с галочкой).
+function vpnRenderServers(note){
+  const box=$("#vpnServer");
+  if(!vpnServers.length){
+    box.innerHTML="";
+    if(note!==undefined) $("#vpnServerNote").textContent=note||"Импортируй подписку, чтобы выбрать страну.";
+    return;
+  }
+  const rows=[{id:"auto",country:"auto",name:"Авто",sub:"лучший по пингу · Hysteria2 в приоритете"}]
+    .concat(vpnServers);
+  if(!rows.some(r=>r.id===vpnSelectedId)) vpnSelectedId="auto";
+  box.innerHTML="";
+  rows.forEach(r=>{
+    const row=document.createElement("div");
+    row.className="vpn-srv-row"+(r.id===vpnSelectedId?" active":"");
+    row.innerHTML=`${vpnFlag(r.country)}
+      <div class="vpn-srv-body">
+        <div class="vpn-srv-name">${r.name}</div>
+        <div class="vpn-srv-sub">${r.sub||""}</div>
+      </div>${VPN_CHECK}`;
+    row.onclick=async()=>{
+      if(vpnSelectedId===r.id) return;
+      vpnSelectedId=r.id;
+      vpnRenderServers();            // мгновенная подсветка
+      try{
+        const st=await api().vpn_select(r.id);
+        if(st){ if(st.ok===false && st.error) toast(st.error,"warn");
+                else if(st.message) toast(st.message,"ok");
+                vpnApplyState(st); }
+      }catch(e){}
+    };
+    box.appendChild(row);
+  });
+  if(note!==undefined) $("#vpnServerNote").textContent=note;
+}
+
+// Применяет состояние VPN из бэкенда к окну (список, выбор, статус, тумблер).
+function vpnApplyState(st){
+  if(!st) return;
+  vpnServers=st.servers||[];
+  vpnSelectedId=st.selected||"auto";
+  if(st.sub_url && $("#vpnSubUrl") && !$("#vpnSubUrl").value.trim()) $("#vpnSubUrl").value=st.sub_url;
+  $("#optVpnOn").checked=!!st.enabled;
+  if(st.enabled) vpnSetStatus("Discord идёт через VPN — включён", true);
+  else if(st.imported) vpnSetStatus("Импортировано — выбери сервер и включи", false);
+  else vpnSetStatus(st.available===false?"Не настроен (обнови приложение для VPN)":"Не настроен", false);
+  const note = st.imported ? ("Найдено стран: "+vpnServers.length+".")
+                           : "Импортируй подписку, чтобы выбрать страну.";
+  vpnRenderServers(note);
+  vpnSetBadge(!!st.enabled);
+}
+async function vpnRefresh(){
+  try{ vpnApplyState(await api().vpn_get_state()); }catch(e){}
+}
+
+$("#vpnImport").onclick=async()=>{
+  const url=$("#vpnSubUrl").value.trim(), json=$("#vpnJson").value.trim();
+  if(!url && !json){ toast("Вставь ссылку-подписку или конфиг JSON","warn"); return; }
+  const btn=$("#vpnImport"), old=btn.textContent;
+  btn.disabled=true; btn.textContent="Импорт…";
+  try{
+    const st=await api().vpn_import(url, json);
+    if(st && st.ok===false){ toast(st.error||"Не удалось импортировать","warn"); }
+    else if(st){ toast(st.message||"Импортировано","ok"); }
+    vpnApplyState(st);
+  }catch(e){ toast("Ошибка импорта","warn"); }
+  finally{ btn.disabled=false; btn.textContent=old; }
+};
+
+$("#optVpnOn").onchange=async(e)=>{
+  const want=e.target.checked;
+  e.target.disabled=true;
+  try{
+    const st=await api().vpn_set_enabled(want);
+    if(st && st.ok===false){ toast(st.error||"Не удалось включить VPN","warn"); e.target.checked=!want; }
+    else if(st && st.message){ toast(st.message, want?"ok":""); }
+    if(st) vpnApplyState(st);
+  }catch(err){ e.target.checked=!want; toast("Ошибка VPN","warn"); }
+  finally{ e.target.disabled=false; }
+};
+
+// Бейдж «Discord через VPN» на главном экране (C2): ненавязчивый индикатор.
+function vpnSetBadge(on){
+  const b=$("#vpnBadge");
+  if(b) b.classList.toggle("show", !!on);
+}
+window.onVpnState=(on)=>vpnSetBadge(!!on);
 $("#winMin").onclick=()=>{ if(api().minimize_window) api().minimize_window(); };
 $("#winClose").onclick=()=>{ if(api().close_window) api().close_window(); };
 

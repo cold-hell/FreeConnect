@@ -462,3 +462,59 @@ body.frameless .splash:not(.hide) ~ .win-controls{opacity:0;pointer-events:none}
 .exp-tag{display:inline-block;font-size:10px;font-weight:700;letter-spacing:.3px;
   color:var(--accent);border:1px solid var(--accent);border-radius:6px;padding:1px 6px;
   margin-left:6px;vertical-align:middle;text-transform:uppercase}
+
+/* Вход в отдельное окно (VPN для Discord) — строка-кнопка в настройках */
+.settings-entry{display:flex;align-items:center;justify-content:space-between;gap:12px;
+  width:100%;text-align:left;margin-top:8px;padding:12px 14px;cursor:pointer;
+  background:rgba(255,255,255,.03);border:1px solid var(--panel-brd);border-radius:12px;
+  color:inherit;font-family:inherit;transition:.18s}
+.settings-entry:hover{border-color:var(--accent);background:rgba(255,255,255,.05)}
+.settings-entry .se-main{display:flex;flex-direction:column;gap:5px;font-weight:600}
+.settings-entry .se-main .toggle-sub{font-weight:400}
+.settings-entry .se-arrow{flex:none;font-size:22px;color:var(--txt-dim);line-height:1}
+
+/* Окно VPN для Discord */
+.vpn-status{display:flex;align-items:center;gap:8px;padding:10px 12px;margin-bottom:14px;
+  border-radius:10px;background:rgba(255,255,255,.03);border:1px solid var(--panel-brd);
+  font-weight:600;font-size:13px}
+.vpn-dot{flex:none;width:9px;height:9px;border-radius:50%;background:var(--txt-dim)}
+.vpn-status.on .vpn-dot{background:#39d98a;box-shadow:0 0 8px #39d98a}
+.vpn-section{margin-bottom:16px}
+.vpn-label{font-size:12px;font-weight:700;letter-spacing:.3px;text-transform:uppercase;
+  color:var(--txt-dim);margin-bottom:8px}
+.vpn-row{display:flex;gap:8px}
+.vpn-input{width:100%;box-sizing:border-box;font-family:inherit;font-size:13px;color:inherit;
+  background:rgba(0,0,0,.25);border:1px solid var(--panel-brd);border-radius:10px;padding:10px 12px;
+  outline:none;transition:.18s}
+.vpn-input:focus{border-color:var(--accent)}
+.vpn-json{height:90px;resize:vertical;margin-top:8px;font-family:monospace;font-size:12px}
+.btn.small{padding:8px 14px;font-size:13px;white-space:nowrap;flex:none}
+
+/* Кастомный выбор сервера (вместо нативного select) — карточки в стиле выбора стратегий */
+.vpn-server-list{max-height:250px;overflow-y:auto;margin:2px 0 8px;
+  scrollbar-width:thin;scrollbar-color:var(--accent2) transparent}
+.vpn-server-list::-webkit-scrollbar{width:8px}
+.vpn-server-list::-webkit-scrollbar-thumb{background:linear-gradient(180deg,var(--accent),var(--accent2));border-radius:8px}
+.vpn-srv-row{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:12px;
+  background:var(--panel);border:1px solid var(--panel-brd);margin-bottom:8px;cursor:pointer;transition:.18s}
+.vpn-srv-row:last-child{margin-bottom:0}
+.vpn-srv-row:hover{border-color:var(--accent);transform:translateX(2px)}
+.vpn-srv-row.active{border-color:var(--accent);background:rgba(55,224,196,.1)}
+.vpn-srv-body{display:flex;flex-direction:column;gap:2px;min-width:0;flex:1}
+.vpn-srv-name{font-size:14px;font-weight:600}
+.vpn-srv-sub{font-size:12px;color:var(--txt-dim)}
+.vpn-flag{flex:none;width:26px;height:26px;border-radius:50%;overflow:hidden;
+  border:1px solid rgba(255,255,255,.18);box-shadow:0 1px 3px rgba(0,0,0,.4);
+  display:block;background:#1b2233}
+.vpn-flag svg{display:block;width:100%;height:100%}
+.vpn-srv-check{flex:none;width:20px;height:20px;color:var(--accent);opacity:0;transition:.18s}
+.vpn-srv-row.active .vpn-srv-check{opacity:1}
+
+/* Ненавязчивый бейдж на главном: весь Discord идёт через VPN (C2) */
+.vpn-badge{display:none;align-items:center;gap:7px;margin:10px auto 0;padding:5px 12px;width:max-content;
+  font-size:12px;font-weight:600;color:var(--accent2);
+  background:rgba(107,140,255,.12);border:1px solid rgba(107,140,255,.35);border-radius:20px}
+.vpn-badge.show{display:flex}
+.vpn-badge-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--accent2);
+  box-shadow:0 0 8px var(--accent2);animation:blink 1.6s ease-in-out infinite}
+.vpn-main-toggle{margin-top:4px;border-top:1px solid var(--panel-brd);padding-top:14px}

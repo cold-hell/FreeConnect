@@ -101,6 +101,9 @@
       </button>
     </div>
     <div class="status-line" id="statusLine">Обход выключен</div>
+    <div class="vpn-badge" id="vpnBadge" title="Весь трафик Discord идёт через твой VPN">
+      <span class="vpn-badge-dot"></span>Discord через VPN
+    </div>
   </section>
 
   <!-- Статусы сервисов -->
@@ -244,22 +247,25 @@
         <span class="switch"><input type="checkbox" id="optGameFilter"><span class="slider"></span></span>
       </label>
       <label class="toggle-row">
-        <span>Следить за доступностью и авто-восстанавливать<small class="toggle-sub">проверяет голос, Discord и YouTube — при ухудшении связи сам переключит стратегию</small></span>
+        <span>Авто-восстановление связи<small class="toggle-sub">следит за Discord, YouTube и живостью голоса в звонке — при обрыве сам переключит стратегию</small></span>
         <span class="switch"><input type="checkbox" id="optMonitor" checked><span class="slider"></span></span>
+      </label>
+      <label class="toggle-row">
+        <span>Точная проверка голоса<small class="toggle-sub">при создании своей стратегии попросит зайти в голосовой канал Discord и подтвердить, что голос реально подключился — без ложных «работает»</small></span>
+        <span class="switch"><input type="checkbox" id="optVoiceConfirm"><span class="slider"></span></span>
       </label>
       <label class="toggle-row">
         <span>Шифровать DNS (DNS-over-HTTPS)<small class="toggle-sub">провайдер не видит и не подменяет DNS-запросы. Включи, если сайт не открывается даже с обходом</small></span>
         <span class="switch"><input type="checkbox" id="optDoh"><span class="slider"></span></span>
       </label>
       <div class="settings-note" id="dohNote" style="display:none;color:#ff8a6a">Не удалось включить DNS-over-HTTPS — проверь интернет и что порт 53 свободен.</div>
-      <label class="toggle-row">
-        <span>Точная проверка голоса<small class="toggle-sub">при создании своей стратегии попросит зайти в голосовой канал Discord и подтвердить, что голос реально подключился — без ложных «работает»</small></span>
-        <span class="switch"><input type="checkbox" id="optVoiceConfirm"><span class="slider"></span></span>
-      </label>
-      <label class="toggle-row">
-        <span>Следить за живостью голоса <span class="exp-tag">эксперимент</span><small class="toggle-sub">во время звонка наблюдает реальный поток Discord: если голос «замолчал» (односторонний/мёртвый) — сам чинит и подскажет сменить регион канала</small></span>
-        <span class="switch"><input type="checkbox" id="optVoiceWatch"><span class="slider"></span></span>
-      </label>
+
+      <!-- Продвинутое: вход в отдельное окно VPN-для-Discord -->
+      <button class="settings-entry" id="openVpn">
+        <span class="se-main">VPN для Discord<small class="toggle-sub">гнать весь Discord через твой VPN (VLESS/Hysteria2) — когда провайдер душит голос и обход не держит</small></span>
+        <span class="se-arrow">›</span>
+      </button>
+
       <button class="btn ghost" id="replayTour" style="width:100%;margin-top:8px">Показать обучение снова</button>
       <button class="btn ghost" id="sendLogs" style="width:100%;margin-top:8px">Собрать логи для поддержки</button>
       <div class="settings-note" id="logsNote">winws.exe часто ложно определяется антивирусом — это нормально для обхода блокировок.</div>
@@ -267,6 +273,40 @@
         <span id="appVersion">FreeConnect</span>
         <button class="link-btn" id="checkUpdate">Проверить обновления</button>
       </div>
+    </div>
+  </div>
+</div>
+
+<!-- Окно VPN для Discord (открывается из настроек) -->
+<div class="modal" id="vpnModal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div class="modal-title">VPN для Discord</div>
+      <button class="icon-btn" id="closeVpn">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="vpn-status" id="vpnStatus"><span class="vpn-dot"></span><span id="vpnStatusText">Не настроен</span></div>
+
+      <div class="vpn-section">
+        <div class="vpn-label">Подписка</div>
+        <div class="vpn-row">
+          <input type="text" id="vpnSubUrl" class="vpn-input" placeholder="https://…/sub/…" autocomplete="off" spellcheck="false">
+          <button class="btn primary small" id="vpnImport">Импортировать</button>
+        </div>
+        <button class="link-btn" id="vpnPasteJsonBtn">или вставить конфиг (JSON)</button>
+        <textarea id="vpnJson" class="vpn-input vpn-json" style="display:none" placeholder="[{ … }] — конфиг xray"></textarea>
+      </div>
+
+      <div class="vpn-section">
+        <div class="vpn-label">Сервер</div>
+        <div class="vpn-server-list" id="vpnServer"></div>
+        <div class="settings-note" id="vpnServerNote">Импортируй подписку, чтобы выбрать страну.</div>
+      </div>
+
+      <label class="toggle-row vpn-main-toggle">
+        <span>Весь Discord через VPN<small class="toggle-sub">включится и будет держаться, пока не выключишь</small></span>
+        <span class="switch"><input type="checkbox" id="optVpnOn"><span class="slider"></span></span>
+      </label>
     </div>
   </div>
 </div>
