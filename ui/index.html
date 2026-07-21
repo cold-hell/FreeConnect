@@ -269,9 +269,9 @@
         <span class="se-arrow">›</span>
       </button>
 
-      <!-- Продвинутое: вход в отдельное окно обхода Telegram -->
+      <!-- Продвинутое: вход в отдельное окно соединения Telegram -->
       <button class="settings-entry" id="openTg">
-        <span class="se-main">Обход Telegram<small class="toggle-sub">разблокировать Telegram без VPN — локальный прокси через веб-вход Telegram</small></span>
+        <span class="se-main">Соединение Telegram<small class="toggle-sub">стабильная связь без VPN — локальный прокси через веб-канал Telegram</small></span>
         <span class="se-arrow">›</span>
       </button>
 
@@ -320,18 +320,18 @@
   </div>
 </div>
 
-<!-- Окно обхода Telegram (открывается из настроек) -->
+<!-- Окно соединения Telegram (открывается из настроек) -->
 <div class="modal" id="tgModal">
   <div class="modal-card">
     <div class="modal-head">
-      <div class="modal-title">Обход Telegram</div>
+      <div class="modal-title">Соединение Telegram</div>
       <button class="icon-btn" id="closeTg">✕</button>
     </div>
     <div class="modal-body">
       <div class="vpn-status" id="tgStatus"><span class="vpn-dot"></span><span id="tgStatusText">Выключен</span></div>
 
       <div class="vpn-section">
-        <div class="settings-note">Заворачивает Telegram в его же веб-вход (web.telegram.org) — работает без VPN и подписок. Нажми «Настроить автоматически», и Telegram сам предложит добавить прокси.</div>
+        <div class="settings-note">Направляет Telegram через его собственный веб-канал (web.telegram.org) — без VPN и подписок. Нажми «Настроить автоматически», и Telegram сам предложит добавить прокси.</div>
         <button class="btn primary" id="tgAutoBtn" style="width:100%;margin-top:10px">Настроить автоматически</button>
         <div class="settings-note" id="tgManual" style="margin-top:8px">Вручную: Telegram → Настройки → Продвинутые → Тип соединения → SOCKS5, <b id="tgManualAddr">127.0.0.1:1080</b></div>
       </div>
@@ -343,7 +343,7 @@
       </div>
 
       <div class="vpn-section">
-        <button class="btn" id="tgCheckBtn" style="width:100%">Проверить обход Telegram</button>
+        <button class="btn" id="tgCheckBtn" style="width:100%">Проверить соединение</button>
         <div class="tg-diag" id="tgDiag" hidden>
           <div class="tg-diag-verdict" id="tgDiagVerdict"></div>
           <div class="tg-diag-rows" id="tgDiagRows"></div>
@@ -354,7 +354,7 @@
       </div>
 
       <label class="toggle-row vpn-main-toggle">
-        <span>Обход Telegram включён<small class="toggle-sub">пока выключен — Telegram работать не будет</small></span>
+        <span>Соединение Telegram включено<small class="toggle-sub">пока выключено — Telegram работать не будет</small></span>
         <span class="switch"><input type="checkbox" id="optTgOn"><span class="slider"></span></span>
       </label>
     </div>

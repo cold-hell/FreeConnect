@@ -1001,7 +1001,7 @@ class Api:
             self.cfg["tg_enabled"] = False
             config.save(self.cfg)
             self._push("onTgState", False)
-            return {**self.tg_get_state(), "ok": True, "message": "Обход Telegram выключен"}
+            return {**self.tg_get_state(), "ok": True, "message": "Соединение Telegram выключено"}
 
         port = int(self.cfg.get("tg_port", tgproxy.DEFAULT_PORT))
         try:
@@ -1050,7 +1050,7 @@ class Api:
         rows = res.get("rows", [])
         alive = [r["ip"] for r in rows if r.get("ok")]
         if alive:
-            verdict = f"Обход Telegram работает — живой адрес: {', '.join(alive)}"
+            verdict = f"Соединение Telegram работает — живой адрес: {', '.join(alive)}"
             hint = ""
         elif not rows:
             verdict = "Не с чем работать: нет ни одного адреса для проверки"
@@ -1071,7 +1071,7 @@ class Api:
         if getattr(self, "_tg_discovering", False):
             return {"ok": False, "error": "Поиск уже идёт"}
         if not self.tgproxy.available():
-            return {"ok": False, "error": "Обход Telegram недоступен"}
+            return {"ok": False, "error": "Соединение Telegram недоступно"}
         self._tg_discovering = True
         threading.Thread(target=self._tg_discover_worker, daemon=True,
                          name="tg-discover").start()

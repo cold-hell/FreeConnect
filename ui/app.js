@@ -825,7 +825,7 @@ window.onTgDiscoverDone=(r)=>{
 $("#optTgOn").onchange=async(e)=>{
   const want=e.target.checked;
   // Выключение = Telegram перестаёт работать: он настроен ходить через наш прокси.
-  if(!want && !confirm("Выключить обход Telegram?\n\nTelegram настроен ходить через наш прокси, "+
+  if(!want && !confirm("Выключить соединение Telegram?\n\nTelegram настроен ходить через наш прокси, "+
                        "поэтому пока обход выключен, он работать не будет.\n\n"+
                        "Чтобы вернуть Telegram без обхода, отключи прокси в самом Telegram: "+
                        "Настройки → Продвинутые → Тип соединения.")){
@@ -834,10 +834,10 @@ $("#optTgOn").onchange=async(e)=>{
   e.target.disabled=true;
   try{
     const st=await api().tg_set_enabled(want);
-    if(st && st.ok===false){ toast(st.error||"Не удалось включить обход Telegram","warn"); e.target.checked=!want; }
+    if(st && st.ok===false){ toast(st.error||"Не удалось включить соединение Telegram","warn"); e.target.checked=!want; }
     else if(st && st.message){ toast(st.message, want?"ok":""); }
     if(st) tgApplyState(st);
-  }catch(err){ e.target.checked=!want; toast("Ошибка обхода Telegram","warn"); }
+  }catch(err){ e.target.checked=!want; toast("Ошибка соединения Telegram","warn"); }
   finally{ e.target.disabled=false; }
 };
 // Бейдж «Telegram через прокси» на главном экране.
