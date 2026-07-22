@@ -1,0 +1,60 @@
+name: Что-то не работает
+description: Discord / YouTube / Telegram не открывается, голос заикается, ошибка в программе
+labels: ["problem"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Спасибо, что помогаешь. Заполни поля ниже — так я пойму проблему без долгих переписок.
+        **Сначала загляни в [частые вопросы](https://github.com/cold-hell/FreeConnect#-частые-вопросы)** — половина проблем решается там.
+
+  - type: input
+    id: version
+    attributes:
+      label: Версия FreeConnect
+      description: Видно в шапке окна программы (например, 0.3.0).
+      placeholder: "0.3.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: what
+    attributes:
+      label: Что не работает
+      multiple: true
+      options:
+        - Discord (сайт/сообщения)
+        - Discord (голос / демонстрация экрана)
+        - YouTube
+        - Telegram
+        - Сама программа (ошибка, не запускается)
+    validations:
+      required: true
+
+  - type: input
+    id: provider
+    attributes:
+      label: Провайдер и город
+      description: Помогает — блокировки у провайдеров разные.
+      placeholder: "Ростелеком, Казань"
+    validations:
+      required: false
+
+  - type: textarea
+    id: tried
+    attributes:
+      label: Что уже пробовал
+      description: Например «Подобрать автоматически», «Глубокий поиск», перезапуск.
+      placeholder: Нажимал «Подобрать автоматически» — не помогло.
+    validations:
+      required: false
+
+  - type: textarea
+    id: details
+    attributes:
+      label: Подробности
+      description: |
+        Опиши, что именно происходит. Если можешь — приложи логи:
+        Настройки → «Собрать логи для поддержки» → перетащи сюда .zip.
+    validations:
+      required: false

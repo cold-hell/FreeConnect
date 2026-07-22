@@ -26,3 +26,4 @@ Thumbs.db
 # provision из bundled runtime при первом запуске / берутся из zapret.
 runtime/
 .claude/
+promo/
