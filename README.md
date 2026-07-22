@@ -41,12 +41,15 @@ FreeConnect — утилита для **модификации сетевых п
 
 Программа **бесплатная**, без рекламы и сбора данных, с открытым исходным кодом.
 
-<!-- СКРИНШОТЫ: положи файлы в docs/ и раскомментируй. Рекомендованные кадры — в promo/README.md.
 <div align="center">
-  <img src="docs/screenshot-main.png" width="45%" alt="Главное окно">
-  <img src="docs/screenshot-telegram.png" width="45%" alt="Соединение Telegram">
+  <img src="docs/screenshot-main.png" width="46%" alt="Главное окно — всё работает">
+  <img src="docs/screenshot-telegram.png" width="46%" alt="Соединение Telegram">
+  <br>
+  <img src="docs/screenshot-strategy.png" width="46%" alt="Генерация своей стратегии">
+  <img src="docs/screenshot-vpn.png" width="46%" alt="VPN для Discord">
+  <br>
+  <sub>Слева направо: главное окно · соединение Telegram · генерация своей стратегии · VPN для Discord</sub>
 </div>
--->
 
 ## ⚡ Возможности
 
