@@ -11,20 +11,20 @@ from freeconnect import singbox
 class TestSingBox(unittest.TestCase):
     def setUp(self):
         self.tmp = pathlib.Path(tempfile.mkdtemp())
-        self._orig_cfg = singbox.SINGBOX_CONFIG
+        self._orig_runtime = singbox.paths.RUNTIME_DIR
         self._orig_ensure = singbox.paths.ensure_dirs
-        singbox.SINGBOX_CONFIG = self.tmp / "singbox.json"
+        singbox.paths.RUNTIME_DIR = self.tmp
         singbox.paths.ensure_dirs = lambda: None   # не трогаем реальные C:\FreeConnect
 
     def tearDown(self):
-        singbox.SINGBOX_CONFIG = self._orig_cfg
+        singbox.paths.RUNTIME_DIR = self._orig_runtime
         singbox.paths.ensure_dirs = self._orig_ensure
 
     def test_write_config_roundtrip(self):
         sb = singbox.SingBox()
         cfg = {"outbounds": [{"type": "hysteria2", "tag": "vpn"}], "route": {"final": "direct"}}
         sb.write_config(cfg)
-        back = json.loads(singbox.SINGBOX_CONFIG.read_text(encoding="utf-8"))
+        back = json.loads((self.tmp / "singbox.json").read_text(encoding="utf-8"))
         self.assertEqual(back, cfg)
 
     def test_cmd_has_run_and_config(self):
@@ -32,7 +32,16 @@ class TestSingBox(unittest.TestCase):
         cmd = sb._cmd()
         self.assertIn("run", cmd)
         self.assertIn("-c", cmd)
-        self.assertEqual(cmd[-1], str(singbox.SINGBOX_CONFIG))
+        self.assertEqual(cmd[-1], str(self.tmp / "singbox.json"))
+
+    def test_named_instances_use_separate_files(self):
+        """Пробник и основной туннель не должны затирать конфиг/лог друг друга."""
+        main, probe = singbox.SingBox(), singbox.SingBox(name="singbox-probe")
+        main.write_config({"a": 1})
+        probe.write_config({"b": 2})
+        self.assertNotEqual(main._cmd()[-1], probe._cmd()[-1])
+        self.assertEqual(json.loads((self.tmp / "singbox.json").read_text("utf-8")), {"a": 1})
+        self.assertEqual(json.loads((self.tmp / "singbox-probe.json").read_text("utf-8")), {"b": 2})
 
     def test_available_reflects_binary(self):
         sb = singbox.SingBox()

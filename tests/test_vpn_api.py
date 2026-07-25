@@ -44,7 +44,7 @@ class _FakeSingBox:
     def is_running(self):
         return self._running
 
-    def start(self, config):
+    def start(self, config, settle=None):
         if not self._has:
             raise fcapp.SingBoxError("sing-box не установлен (обнови приложение)")
         self.started_cfg = config
@@ -60,10 +60,23 @@ def _api(has_binary=True, cfg=None):
     api = fcapp.Api.__new__(fcapp.Api)
     api.cfg = dict(cfg or {})
     api.singbox = _FakeSingBox(has_binary)
+    api._vpn_probe = _FakeSingBox(True)     # лёгкий пробник (без TUN)
+    # Параллельные пробы иначе создавали бы РЕАЛЬНЫЕ sing-box — в тестах все
+    # экземпляры заворачиваем на общий фейк.
+    api._vpn_probe_engine = lambda idx: api._vpn_probe
+    api._vpn_cancel = threading.Event()
+    api._vpn_connecting = False
     api._vpn_servers = []
     api._events = []
     api._events_lock = threading.Lock()
     return api
+
+
+def _connect(api):
+    """Синхронный прогон фонового подбора (в бою он крутится в отдельном потоке)."""
+    api._vpn_cancel.clear()
+    api._vpn_connect_worker()
+    return api.vpn_get_state()
 
 
 class TestVpnApi(unittest.TestCase):
@@ -71,19 +84,31 @@ class TestVpnApi(unittest.TestCase):
         # Не трогаем реальный config.json на диске.
         self._orig_save = fcapp.config.save
         fcapp.config.save = lambda c: None
+        # Проверку живости серверов подменяем: без сети, все «живы» с равным пингом —
+        # тогда порядок определяется приоритетом протокола/выбором, как и раньше.
+        self._orig_probe = vpn.probe_server
+        vpn.probe_server = lambda s, timeout=2.0: (True, 10.0)
+        # Фейковый sing-box не поднимает реальный SOCKS, поэтому проверку туннеля
+        # подменяем на «работает» (её собственное поведение тестируется отдельно).
+        self._orig_tunnel = vpn.tunnel_works
+        vpn.tunnel_works = lambda port, **kw: True
 
     def tearDown(self):
         fcapp.config.save = self._orig_save
+        vpn.probe_server = self._orig_probe
+        vpn.tunnel_works = self._orig_tunnel
 
     def test_import_json_populates_country_rows(self):
         api = _api()
         st = api.vpn_import(json_text=_profiles())
         self.assertTrue(st["ok"])
         self.assertTrue(st["imported"])
-        names = {r["name"]: r["sub"] for r in st["servers"]}
-        self.assertIn("Германия", names)
-        self.assertIn("Финляндия", names)
-        self.assertEqual(names["Германия"], "Hysteria2")
+        # По строке на СТРАНУ, id = слаг страны; конкретный сервер — при подключении.
+        rows = {r["id"]: r for r in st["servers"]}
+        self.assertIn("germany", rows)
+        self.assertIn("finland", rows)
+        self.assertEqual(rows["germany"]["name"], "Германия")
+        self.assertTrue(rows["germany"]["sub"].startswith("Hysteria2"))
         # Подписка кэшируется для восстановления без повторного импорта.
         self.assertEqual(api.cfg["vpn_config"], _profiles())
 
@@ -105,45 +130,125 @@ class TestVpnApi(unittest.TestCase):
         st = api.vpn_select("finland")
         self.assertEqual(api.cfg["vpn_country"], "finland")
         self.assertEqual(st["selected"], "finland")
-        # 'auto' сбрасывает страну в пустую (лучший по приоритету).
+        # 'auto' сбрасывает страну в пустую (любая, живая по приоритету).
         st = api.vpn_select("auto")
         self.assertEqual(api.cfg["vpn_country"], "")
         self.assertEqual(st["selected"], "auto")
 
-    def test_enable_starts_singbox_with_discord_route(self):
+    def test_enable_is_async_and_reports_connecting(self):
+        """Включение НЕ должно блокировать вызов из UI (иначе окно висит и тумблер
+        «не выключается»): сразу отвечаем «подключаюсь», итог придёт событием."""
         api = _api()
         api.vpn_import(json_text=_profiles())
-        st = api.vpn_set_enabled(True)
+        started = []
+        orig = threading.Thread
+        try:
+            threading.Thread = lambda *a, **kw: type(
+                "T", (), {"start": lambda _s: started.append(kw.get("name")),
+                          "daemon": True})()
+            st = api.vpn_set_enabled(True)
+        finally:
+            threading.Thread = orig
         self.assertTrue(st["ok"])
-        self.assertTrue(st["enabled"])
+        self.assertTrue(st["connecting"])
+        self.assertEqual(api.singbox.start_calls, 0)   # TUN ещё не трогали
+        self.assertIn("vpn-connect", started)
+
+    def test_connect_starts_singbox_with_discord_route(self):
+        api = _api()
+        api.vpn_import(json_text=_profiles())
+        _connect(api)
         self.assertEqual(api.singbox.start_calls, 1)
         self.assertTrue(api.cfg["vpn_enabled"])
-        # Конфиг реально маршрутизирует именно Discord в vpn.
-        rule = api.singbox.started_cfg["route"]["rules"][0]
+        rule = next(r for r in api.singbox.started_cfg["route"]["rules"]
+                    if "process_name" in r)
         self.assertIn("Discord.exe", rule["process_name"])
         self.assertEqual(rule["outbound"], "vpn")
 
-    def test_enable_auto_prefers_hysteria2(self):
+    def test_tun_config_has_no_probe_socks(self):
+        """Боевой TUN-конфиг чистый: проверочный SOCKS живёт в отдельном пробнике."""
         api = _api()
         api.vpn_import(json_text=_profiles())
-        api.vpn_set_enabled(True)   # без выбора страны -> авто
-        ob = next(o for o in api.singbox.started_cfg["outbounds"] if o["tag"] == "vpn")
-        self.assertEqual(ob["type"], "hysteria2")   # Германия Hysteria2 в приоритете
+        _connect(api)
+        self.assertTrue(all(i["type"] != "socks"
+                            for i in api.singbox.started_cfg["inbounds"]))
 
-    def test_enable_selected_country_overrides_priority(self):
+    def test_probe_runs_without_tun(self):
+        """Кандидатов проверяем БЕЗ TUN — иначе адаптер не успевает освободиться
+        и рвётся системная сеть."""
+        api = _api()
+        api.vpn_import(json_text=_profiles())
+        _connect(api)
+        self.assertGreaterEqual(api._vpn_probe.start_calls, 1)
+        self.assertTrue(all(i["type"] != "tun"
+                            for i in api._vpn_probe.started_cfg["inbounds"]))
+        socks = [i for i in api._vpn_probe.started_cfg["inbounds"] if i["type"] == "socks"]
+        self.assertEqual(socks[0]["listen"], "127.0.0.1")
+
+    def test_connect_auto_prefers_hysteria2(self):
+        api = _api()
+        api.vpn_import(json_text=_profiles())
+        _connect(api)
+        ob = next(o for o in api.singbox.started_cfg["outbounds"] if o["tag"] == "vpn")
+        self.assertEqual(ob["type"], "hysteria2")
+
+    def test_connect_selected_country_overrides_priority(self):
         api = _api()
         api.vpn_import(json_text=_profiles())
         api.vpn_select("finland")
-        api.vpn_set_enabled(True)
+        _connect(api)
         ob = next(o for o in api.singbox.started_cfg["outbounds"] if o["tag"] == "vpn")
         self.assertEqual(ob["type"], "vless")
+
+    def test_connect_liveness_overrides_protocol_priority(self):
+        api = _api()
+        api.vpn_import(json_text=_profiles())
+        vpn.probe_server = lambda s, timeout=2.0: (s.kind == "vless-reality", 10.0)
+        _connect(api)
+        ob = next(o for o in api.singbox.started_cfg["outbounds"] if o["tag"] == "vpn")
+        self.assertEqual(ob["type"], "vless")
+
+    def test_dead_tunnel_falls_through_to_next_server(self):
+        """Если через сервер не идёт трафик — берём другой, TUN поднимаем только
+        для проверенного (кандидаты проверяются параллельно, без TUN)."""
+        seen = []
+        api = _api()
+        api.vpn_import(json_text=_profiles())
+        # Мёртв Hysteria2-выход; рабочим оказывается VLESS.
+        def fake_probe(cand, idx=0):
+            seen.append(cand.uid())
+            return cand.kind == "vless-reality"
+        api._vpn_probe_server = fake_probe
+        _connect(api)
+        self.assertGreaterEqual(len(seen), 2)             # проверили несколько
+        self.assertEqual(api.singbox.start_calls, 1)      # TUN поднят один раз
+        self.assertTrue(api.singbox.is_running())
+        ob = next(o for o in api.singbox.started_cfg["outbounds"] if o["tag"] == "vpn")
+        self.assertEqual(ob["type"], "vless")             # выбран тот, что реально работал
+
+    def test_all_tunnels_dead_leaves_no_tun(self):
+        """Ни один сервер не пропустил трафик -> TUN не поднят вовсе."""
+        api = _api()
+        api.vpn_import(json_text=_profiles())
+        vpn.tunnel_works = lambda port, **kw: False
+        _connect(api)
+        self.assertEqual(api.singbox.start_calls, 0)
+        self.assertFalse(api.singbox.is_running())
+        self.assertFalse(api.cfg.get("vpn_enabled"))
+
+    def test_cancel_during_probe_stops_connect(self):
+        """Выключили тумблер, пока шёл подбор -> подключение прерывается."""
+        api = _api()
+        api.vpn_import(json_text=_profiles())
+        vpn.tunnel_works = lambda port, **kw: (api._vpn_cancel.set(), False)[1]
+        _connect(api)
+        self.assertEqual(api.singbox.start_calls, 0)     # туннель не поднимали
 
     def test_enable_without_binary_errors_gracefully(self):
         api = _api(has_binary=False)
         api.vpn_import(json_text=_profiles())
-        st = api.vpn_set_enabled(True)
-        self.assertFalse(st["ok"])
-        self.assertIn("error", st)
+        _connect(api)                       # TUN поднять нечем -> тихо и без падения
+        self.assertFalse(api.singbox.is_running())
         self.assertFalse(api.cfg.get("vpn_enabled"))
 
     def test_enable_without_import_errors(self):
@@ -209,12 +314,20 @@ class TestVpnApi(unittest.TestCase):
         self.assertFalse(st["ok"])
         self.assertIn("error", st)
 
-    def test_select_while_running_restarts(self):
+    def test_select_while_running_reconnects(self):
         api = _api()
         api.vpn_import(json_text=_profiles())
-        api.vpn_set_enabled(True)      # авто (Германия/Hysteria2)
+        _connect(api)                       # авто (Германия/Hysteria2)
         self.assertEqual(api.singbox.start_calls, 1)
-        api.vpn_select("finland")      # активен -> перезапуск на новый сервер
+        orig = threading.Thread             # реальный поток в тесте не нужен
+        try:
+            threading.Thread = lambda *a, **kw: type("T", (), {"start": lambda _s: None})()
+            st = api.vpn_select("finland")  # активен -> инициируем переподключение
+        finally:
+            threading.Thread = orig
+        self.assertTrue(st.get("connecting"))
+        api._vpn_connecting = False
+        _connect(api)                       # прогоняем подбор синхронно
         self.assertEqual(api.singbox.start_calls, 2)
         ob = next(o for o in api.singbox.started_cfg["outbounds"] if o["tag"] == "vpn")
         self.assertEqual(ob["type"], "vless")

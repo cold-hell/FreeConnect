@@ -327,5 +327,63 @@ class TestEndToEnd(unittest.TestCase):
             p.stop()
 
 
+class TestCfFallback(unittest.TestCase):
+    """Резервный канал через Cloudflare: когда прямые адреса недоступны, идём на
+    kws{dc}.{cf_domain} (host, ip=None -> DNS)."""
+
+    def test_falls_back_to_cf_when_direct_dead(self):
+        p = tgproxy.TgProxy(cf_domains=["relay.example"])
+        calls = []
+
+        async def fake_candidates(dc):
+            return ["10.0.0.1"]
+
+        async def fake_dial(dc, ip, host=None):
+            calls.append((dc, ip, host))
+            if ip is not None:            # прямой адрес — мёртв
+                raise OSError("dead")
+            return _FakeWS(f"wss://{host}/apiws")   # CF-домен — успех
+
+        p._candidates = fake_candidates
+        p._dial = fake_dial
+        ws = asyncio.run(p._ws_connect(2))
+        self.assertEqual(ws.uri, "wss://kws2.relay.example/apiws")
+        self.assertIn((2, None, "kws2.relay.example"), calls)   # ушли в CF
+        self.assertTrue(any(ip == "10.0.0.1" for _, ip, _ in calls))  # но сперва пробовали прямой
+
+    def test_direct_success_skips_cf(self):
+        p = tgproxy.TgProxy(cf_domains=["relay.example"])
+        calls = []
+
+        async def fake_candidates(dc):
+            return ["10.0.0.1"]
+
+        async def fake_dial(dc, ip, host=None):
+            calls.append((dc, ip, host))
+            return _FakeWS("wss://direct/apiws")
+
+        p._candidates = fake_candidates
+        p._dial = fake_dial
+        asyncio.run(p._ws_connect(2))
+        self.assertTrue(all(host is None for _, _, host in calls))  # CF не трогали
+        self.assertTrue(all(ip is not None for _, ip, _ in calls))
+
+    def test_no_direct_no_cf_raises(self):
+        p = tgproxy.TgProxy(cf_domains=[])
+
+        async def fake_candidates(dc):
+            return []
+
+        p._candidates = fake_candidates
+        with self.assertRaises(tgproxy.TgProxyError):
+            asyncio.run(p._ws_connect(2))
+
+    def test_set_cf_domains_updates(self):
+        p = tgproxy.TgProxy()
+        self.assertEqual(p._cf_domains, [])
+        p.set_cf_domains(["a.com", "b.com"])
+        self.assertEqual(p._cf_domains, ["a.com", "b.com"])
+
+
 if __name__ == "__main__":
     unittest.main()

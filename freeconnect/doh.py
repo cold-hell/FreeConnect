@@ -27,20 +27,23 @@ import struct
 import subprocess
 import threading
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Callable
 
 _NO_WINDOW = 0x08000000  # CREATE_NO_WINDOW — не мигать консолью PowerShell
 
 # DoH-резолверы по IP (без бутстрап-DNS для самого DoH). Серты Google/Cloudflare
 # содержат IP-SAN (8.8.8.8/1.1.1.1 и т.д.) — проверка TLS проходит по умолчанию.
-# Google первым: он верифицируется даже в урезанных CA-хранилищах; Cloudflare — фолбэком.
-# Если ни один не верифицируется/не отвечает, self_test не даст включить DoH (DNS не трогаем).
+# Опрашиваем их ПАРАЛЛЕЛЬНО (см. _doh_query) и берём первый валидный ответ, поэтому
+# порядок некритичен. Так DoH устойчив к тому, что один из провайдеров на конкретной
+# машине/канале либо не отвечает (throttle), либо не проходит проверку сертификата
+# (у пользователя наблюдалось CERTIFICATE_VERIFY_FAILED на Cloudflare, но работал
+# Google — при последовательном опросе с Cloudflare впереди прокси затыкался).
 _DOH_URLS = [
-    "https://8.8.8.8/dns-query",
-    "https://8.8.4.4/dns-query",
     "https://1.1.1.1/dns-query",
+    "https://8.8.8.8/dns-query",
     "https://1.0.0.1/dns-query",
+    "https://8.8.4.4/dns-query",
 ]
 _FALLBACK_DNS = "8.8.8.8"  # запасной прямой (plaintext) резолвер на адаптере
 
@@ -63,22 +66,39 @@ def _response_ok(resp: bytes | None) -> bool:
     return (flags & 0x0F) == 0 and ancount >= 1
 
 
-def _doh_query(raw: bytes, timeout: float = 5.0) -> bytes | None:
-    """Шлёт сырой DNS-пакет в DoH и возвращает сырой ответ (или None)."""
-    for url in _DOH_URLS:
+def _doh_one(url: str, raw: bytes, timeout: float) -> bytes | None:
+    """Один DoH-запрос к конкретному резолверу. Валидный ответ -> байты, иначе None."""
+    try:
+        req = urllib.request.Request(
+            url, data=raw, method="POST",
+            headers={
+                "Content-Type": "application/dns-message",
+                "Accept": "application/dns-message",
+                "User-Agent": "FreeConnect-DoH",
+            },
+        )
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            resp = r.read()
+        return resp if _response_ok(resp) else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _doh_query(raw: bytes, timeout: float = 4.0) -> bytes | None:
+    """Шлёт DNS-пакет во ВСЕ резолверы ПАРАЛЛЕЛЬНО и возвращает первый валидный ответ.
+    Последовательный опрос был хрупким: если первый резолвер на этой машине висит по
+    таймауту или не проходит проверку сертификата, прокси затыкался на нём и не отвечал
+    вовсе — тогда система откатывалась на подменяемый plaintext-DNS. Параллельно же
+    отвечает тот, кто на данном канале рабочий, за время самого быстрого из них."""
+    with ThreadPoolExecutor(max_workers=len(_DOH_URLS)) as ex:
+        futures = [ex.submit(_doh_one, url, raw, timeout) for url in _DOH_URLS]
         try:
-            req = urllib.request.Request(
-                url, data=raw, method="POST",
-                headers={
-                    "Content-Type": "application/dns-message",
-                    "Accept": "application/dns-message",
-                    "User-Agent": "FreeConnect-DoH",
-                },
-            )
-            with urllib.request.urlopen(req, timeout=timeout) as r:
-                return r.read()
-        except Exception:
-            continue
+            for fut in as_completed(futures, timeout=timeout + 1.0):
+                resp = fut.result()
+                if resp:
+                    return resp
+        except TimeoutError:
+            pass
     return None
 
 
@@ -151,23 +171,47 @@ class DoHProxy:
 
 # --------------------------------------------------- смена DNS адаптера (netsh) ---
 def _ps(script: str, timeout: float = 15.0) -> tuple[int, str]:
+    # Имена адаптеров на русской Windows кириллические («Беспроводная сеть»). PowerShell
+    # печатает их в OEM-кодировке консоли, и если читать вывод как UTF-8 (тем более под
+    # PYTHONUTF8=1) — декод падает, и адаптер «теряется». Поэтому принудительно переводим
+    # вывод PowerShell в UTF-8 и декодируем сами, устойчиво к сбоям.
     try:
         p = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            capture_output=True, text=True, timeout=timeout, creationflags=_NO_WINDOW,
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+             "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " + script],
+            capture_output=True, timeout=timeout, creationflags=_NO_WINDOW,
         )
-        return p.returncode, (p.stdout or "").strip()
+        return p.returncode, (p.stdout or b"").decode("utf-8", "replace").strip()
     except Exception as e:  # noqa: BLE001
         return 1, str(e)
 
 
 def get_active_adapter() -> str | None:
-    """InterfaceAlias адаптера с IPv4-шлюзом по умолчанию (тот, что в интернете)."""
-    rc, out = _ps(
-        "(Get-NetIPConfiguration | Where-Object {$_.IPv4DefaultGateway -ne $null} "
+    """InterfaceAlias ФИЗИЧЕСКОГО адаптера с IPv4-шлюзом по умолчанию (тот, что реально
+    в интернете). Именно на нём провайдер подменяет DNS, и именно его надо перевести на
+    DoH. Виртуальные TUN-адаптеры VPN (Happ, наш sing-box, WireGuard/TAP) тоже имеют шлюз
+    по умолчанию — если сесть на них, DoH прикрывает не тот путь, а реальный резолвинг
+    продолжает течь через физический адаптер на подменяемый plaintext-DNS. Поэтому берём
+    физический с наименьшей метрикой; если такого не нашлось (нестандартная сеть) —
+    откатываемся на любой адаптер со шлюзом, как раньше."""
+    phys = (
+        "$p=@(Get-NetAdapter -Physical -ErrorAction SilentlyContinue "
+        "| Where-Object {$_.Status -eq 'Up'} | Select-Object -ExpandProperty ifIndex); "
+        "(Get-NetIPConfiguration | Where-Object {$_.IPv4DefaultGateway -ne $null "
+        "-and $p -contains $_.InterfaceIndex} "
+        "| Sort-Object {$_.IPv4DefaultGateway.RouteMetric} "
         "| Select-Object -First 1 -ExpandProperty InterfaceAlias)"
     )
-    return out.splitlines()[0].strip() if (rc == 0 and out) else None
+    rc, out = _ps(phys)
+    if rc == 0 and out.strip():
+        return out.splitlines()[0].strip()
+    # Фолбэк: любой адаптер со шлюзом (одноадаптерные машины, экзотические драйверы).
+    rc, out = _ps(
+        "(Get-NetIPConfiguration | Where-Object {$_.IPv4DefaultGateway -ne $null} "
+        "| Sort-Object {$_.IPv4DefaultGateway.RouteMetric} "
+        "| Select-Object -First 1 -ExpandProperty InterfaceAlias)"
+    )
+    return out.splitlines()[0].strip() if (rc == 0 and out.strip()) else None
 
 
 def get_dns(alias: str) -> list[str]:

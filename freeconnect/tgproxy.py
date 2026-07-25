@@ -365,7 +365,8 @@ class TgProxy:
 
     _serializable = False   # pywebview не должен обходить объект при сборке js_api
 
-    def __init__(self, log=None, endpoints: dict | None = None) -> None:
+    def __init__(self, log=None, endpoints: dict | None = None,
+                 cf_domains: list | None = None) -> None:
         self._log = log or (lambda _m: None)
         self._thread: threading.Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -376,6 +377,11 @@ class TgProxy:
         # Переопределение таблицы живых адресов из config.json (tg_endpoints):
         # позволяет починить внезапно умерший IP, не пересобирая приложение.
         self._endpoints = endpoints or None
+        # Резервный канал через Cloudflare: список base-доменов, за которыми стоит
+        # релей на веб-вход Telegram. Идём на kws{dc}.{base} (обычный DNS, не
+        # заблокированный IP Telegram) — страховка, когда прямые адреса придушат.
+        # Пусто = резерва нет (работаем как раньше, только по прямым IP).
+        self._cf_domains = list(cf_domains or [])
 
     def available(self) -> bool:
         """Есть ли зависимости для работы (websockets + cryptography)."""
@@ -391,6 +397,11 @@ class TgProxy:
         """Подменяет таблицу живых адресов (после автопоиска). Применится к новым
         соединениям; уже открытые не трогаем."""
         self._endpoints = endpoints or None
+
+    def set_cf_domains(self, cf_domains: list | None) -> None:
+        """Подменяет список резервных Cloudflare-доменов (после обновления с канала).
+        Применится к новым соединениям."""
+        self._cf_domains = list(cf_domains or [])
 
     def stats(self) -> dict:
         return dict(self._stats)
@@ -517,9 +528,22 @@ class TgProxy:
             pass
         return out
 
-    async def _dial(self, dc: int, ip: str):
-        """Одна попытка: TCP на конкретный адрес -> TLS с настоящим SNI -> WebSocket."""
+    async def _dial(self, dc: int, ip: str | None, host: str | None = None):
+        """Одна попытка: TCP -> TLS с настоящим SNI -> WebSocket.
+
+        host — имя для SNI, проверки сертификата и WS-URL (по умолчанию
+        kws{dc}.web.telegram.org). ip — на какой адрес коннектиться; None означает
+        «резолвить host через DNS» (для резервных Cloudflare-доменов, которые DNS
+        отдаёт нормально, в отличие от заблокированного веб-входа Telegram)."""
+        host = host or WS_HOST_TMPL.format(dc=dc)
+        url = f"wss://{host}/apiws"
         loop = asyncio.get_running_loop()
+        if ip is None:
+            infos = await loop.getaddrinfo(host, 443, family=socket.AF_INET,
+                                           type=socket.SOCK_STREAM)
+            if not infos:
+                raise TgProxyError(f"{host}: DNS не дал адреса")
+            ip = infos[0][4][0]
         sk = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sk.setblocking(False)
         try:
@@ -529,8 +553,8 @@ class TgProxy:
             # server_hostname= задаёт SNI и имя для проверки сертификата,
             # proxy=None — не подхватывать системный прокси из окружения.
             return await websockets.connect(
-                WS_URL_TMPL.format(dc=dc), sock=sk, ssl=_tls_context(),
-                server_hostname=WS_HOST_TMPL.format(dc=dc), subprotocols=["binary"],
+                url, sock=sk, ssl=_tls_context(),
+                server_hostname=host, subprotocols=["binary"],
                 max_size=None, open_timeout=WS_OPEN_TIMEOUT, proxy=None,
             )
         except Exception:
@@ -543,10 +567,11 @@ class TgProxy:
     async def _ws_connect(self, dc: int):
         """Открывает веб-сокет к kws{dc}, перебирая адреса; на каждом — одна повторная
         попытка: узлы Telegram изредка сбрасывают соединение прямо на рукопожатии
-        (наблюдалось на ДЦ2), и ретрай сглаживает такие транзиентные сбросы."""
+        (наблюдалось на ДЦ2), и ретрай сглаживает такие транзиентные сбросы.
+
+        Если ВСЕ прямые адреса недоступны (провайдер прибил IP веб-входа) —
+        уходим в резервный канал через Cloudflare-домены (страховка)."""
         candidates = await self._candidates(dc)
-        if not candidates:
-            raise TgProxyError(f"ДЦ{dc}: нет адресов для подключения")
         last: Exception | None = None
         for ip in candidates:
             for attempt in range(2):
@@ -556,8 +581,24 @@ class TgProxy:
                     last = e
                     if attempt == 0:
                         await asyncio.sleep(0.3)
+
+        # Прямые адреса не сработали — резерв через Cloudflare (если задан).
+        for base in self._cf_domains:
+            host = f"kws{dc}.{base}"
+            self._log(f"tgproxy: ДЦ{dc} прямые адреса недоступны — резерв через Cloudflare ({base})")
+            for attempt in range(2):
+                try:
+                    return await self._dial(dc, None, host=host)
+                except Exception as e:  # noqa: BLE001
+                    last = e
+                    if attempt == 0:
+                        await asyncio.sleep(0.3)
+
+        if not candidates and not self._cf_domains:
+            raise TgProxyError(f"ДЦ{dc}: нет адресов для подключения")
         raise TgProxyError(
-            f"ДЦ{dc}: не подключиться ни к одному из {len(candidates)} адресов ({last})")
+            f"ДЦ{dc}: не подключиться ни к прямым адресам ({len(candidates)}), "
+            f"ни через резерв Cloudflare ({len(self._cf_domains)}) ({last})")
 
     async def _socks_handshake(self, reader: asyncio.StreamReader,
                                writer: asyncio.StreamWriter):

@@ -26,6 +26,10 @@ body{
   user-select:none;
   -webkit-font-smoothing:antialiased;
 }
+/* В полях ввода выделение и правка должны работать (глобальный user-select:none
+   на body в WebView2/Chromium иначе блокирует выделение текста и внутри них).
+   no-drag — чтобы поле не считалось частью области перетаскивания окна. */
+input,textarea{user-select:text;-webkit-user-select:text;-webkit-app-region:no-drag}
 
 /* Фоновые эффекты */
 .aurora{
@@ -257,7 +261,7 @@ body.frameless .splash:not(.hide) ~ .win-controls{opacity:0;pointer-events:none}
 
 /* Эфемерный тост (результат ручной смены и т.п.) */
 .toast{position:fixed;left:50%;bottom:22px;transform:translate(-50%,20px);
-  z-index:60;max-width:88%;padding:11px 16px;border-radius:12px;
+  z-index:75;max-width:88%;padding:11px 16px;border-radius:12px;
   background:rgba(18,22,38,.96);border:1px solid rgba(120,140,220,.3);
   color:#e7ecff;font-size:13px;line-height:1.4;text-align:center;
   box-shadow:0 10px 30px rgba(0,0,0,.4);opacity:0;pointer-events:none;
@@ -320,7 +324,11 @@ body.frameless .splash:not(.hide) ~ .win-controls{opacity:0;pointer-events:none}
 .found-item .fi-meta{font-size:12px;color:var(--txt-dim)}
 
 /* Модалки */
-.modal{position:fixed;inset:0;z-index:30;display:none;place-items:center;
+/* z-index:65 — ВЫШЕ полосы перетаскивания окна (.titlebar-drag, z-60): иначе она
+   лежит поверх верха модалки и перехватывает протаскивание мышью (выделение текста
+   в полях модалки двигало бы окно вместо выделения). Бэкдроп на inset:0 перекрывает
+   полосу целиком, поэтому drag над модалкой больше не срабатывает. */
+.modal{position:fixed;inset:0;z-index:65;display:none;place-items:center;
   background:rgba(5,7,15,.7);backdrop-filter:blur(6px)}
 .modal.show{display:grid;animation:fade .25s}
 .modal-card{width:min(460px,92vw);max-height:80vh;background:linear-gradient(160deg,#111726,#0b0f1c);
@@ -534,7 +542,12 @@ body.frameless .splash:not(.hide) ~ .win-controls{opacity:0;pointer-events:none}
 .vpn-srv-row.active .vpn-srv-check{opacity:1}
 
 /* Ненавязчивый бейдж на главном: весь Discord идёт через VPN (C2) */
-.vpn-badge{display:none;align-items:center;gap:7px;margin:10px auto 0;padding:5px 12px;width:max-content;
+/* Контейнер бейджей активных каналов: одна строка по центру, переносится при
+   нехватке ширины. Скрыт целиком, пока не включён ни один канал — иначе съедал бы
+   gap колонки hero и бейджи «прилипали» к чипам статусов. */
+.badges{display:none;flex-wrap:wrap;justify-content:center;align-items:center;gap:8px}
+.badges.show{display:flex}
+.vpn-badge{display:none;align-items:center;gap:7px;margin:0;padding:5px 12px;width:max-content;
   font-size:12px;font-weight:600;color:var(--accent2);
   background:rgba(107,140,255,.12);border:1px solid rgba(107,140,255,.35);border-radius:20px}
 .vpn-badge.show{display:flex}

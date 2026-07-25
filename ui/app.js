@@ -43,18 +43,22 @@ const MockApi = {
   async vpn_import(url, json){
     if(!url && !json) return {...await this.vpn_get_state(), ok:false, error:"Вставь ссылку или JSON"};
     this._vpn.servers=[
-      {id:"finland",country:"finland",name:"Финляндия",sub:"Hysteria2"},
-      {id:"germany",country:"germany",name:"Германия",sub:"Hysteria2"},
-      {id:"italy",country:"italy",name:"Италия",sub:"Hysteria2"},
-      {id:"netherlands",country:"netherlands",name:"Нидерланды",sub:"Hysteria2"},
-      {id:"poland",country:"poland",name:"Польша",sub:"VLESS-Reality"},
-      {id:"japan",country:"japan",name:"Япония",sub:"VLESS-Reality"},
-      {id:"france",country:"france",name:"Франция",sub:"Hysteria2"},
-      {id:"united-kingdom",country:"united-kingdom",name:"Великобритания",sub:"VLESS-Reality"},
+      {id:"netherlands",country:"netherlands",name:"Нидерланды",sub:"Hysteria2 · 22 серв."},
+      {id:"germany",country:"germany",name:"Германия",sub:"Hysteria2 · 25 серв."},
+      {id:"finland",country:"finland",name:"Финляндия",sub:"VLESS-Reality · 22 серв."},
+      {id:"france",country:"france",name:"Франция",sub:"Hysteria2 · 10 серв."},
+      {id:"poland",country:"poland",name:"Польша",sub:"Hysteria2 · 19 серв."},
+      {id:"japan",country:"japan",name:"Япония",sub:"Hysteria2 · 14 серв."},
+      {id:"__other__",country:"auto",name:"🌍 Другие",sub:"VLESS-Reality · 4 серв."},
     ];
     return {...await this.vpn_get_state(), ok:true, message:"Импортировано стран: "+this._vpn.servers.length+" (мок)"};
   },
   async vpn_select(country){ this._vpn.selected=country==="auto"?"auto":country; return {...await this.vpn_get_state(), ok:true}; },
+  // Свои сайты (мок для отладки дизайна в браузере).
+  _sites:"",
+  async sites_get(){ return {text:this._sites, count:this._sites.split(/[\s,]+/).filter(x=>x.trim()).length}; },
+  async sites_set(text){ this._sites=(text||"").trim(); const c=this._sites.split(/[\s,]+/).filter(x=>x.trim()).length;
+    return {ok:true, text:this._sites, count:c, message:"Сохранено сайтов: "+c+" (мок)"}; },
   // Обход Telegram (мок для отладки дизайна в браузере).
   _tg:{enabled:false},
   async tg_get_state(){ return {available:true, enabled:this._tg.enabled, port:1080, host:"127.0.0.1", deeplink:"tg://socks?server=127.0.0.1&port=1080", autostart:false}; },
@@ -646,7 +650,7 @@ function vpnRenderServers(note){
     if(note!==undefined) $("#vpnServerNote").textContent=note||"Импортируй подписку, чтобы выбрать страну.";
     return;
   }
-  const rows=[{id:"auto",country:"auto",name:"Авто",sub:"лучший по пингу · Hysteria2 в приоритете"}]
+  const rows=[{id:"auto",country:"auto",name:"Авто",sub:"проверяем доступность, берём рабочий сервер"}]
     .concat(vpnServers);
   if(!rows.some(r=>r.id===vpnSelectedId)) vpnSelectedId="auto";
   box.innerHTML="";
@@ -684,7 +688,7 @@ function vpnApplyState(st){
   if(st.enabled) vpnSetStatus("Discord идёт через VPN — включён", true);
   else if(st.imported) vpnSetStatus("Импортировано — выбери сервер и включи", false);
   else vpnSetStatus(st.available===false?"Не настроен (обнови приложение для VPN)":"Не настроен", false);
-  const note = st.imported ? ("Найдено стран: "+vpnServers.length+".")
+  const note = st.imported ? ("Найдено стран: "+vpnServers.length+". Внутри страны берём рабочий сервер сами.")
                            : "Импортируй подписку, чтобы выбрать страну.";
   vpnRenderServers(note);
   vpnSetBadge(!!st.enabled);
@@ -714,21 +718,75 @@ $("#optVpnOn").onchange=async(e)=>{
     const st=await api().vpn_set_enabled(want);
     if(st && st.ok===false){ toast(st.error||"Не удалось включить VPN","warn"); e.target.checked=!want; }
     else if(st && st.message){ toast(st.message, want?"ok":""); }
-    if(st) vpnApplyState(st);
+    // Подключение идёт в фоне: показываем прогресс, но тумблер НЕ блокируем —
+    // человек должен иметь возможность выключить, не дожидаясь конца подбора.
+    if(st && st.connecting){ vpnSetStatus("Подбираю рабочий сервер…", false); }
+    else if(st){ vpnApplyState(st); }
   }catch(err){ e.target.checked=!want; toast("Ошибка VPN","warn"); }
   finally{ e.target.disabled=false; }
 };
 
+// Прогресс подбора: подбор занимает секунды, без индикации это выглядит зависанием.
+window.onVpnProgress=(p)=>{
+  if(!p) return;
+  vpnSetStatus(`Проверяю серверы… ${p.done||0}/${p.total||0}`, false);
+};
+
+// Итог фонового подключения VPN (успех или причина отказа).
+window.onVpnResult=(r)=>{
+  if(!r) return;
+  if(r.ok){ toast(r.message||"VPN включён","ok"); }
+  else if(r.error){ toast(r.error,"warn"); }
+  vpnRefresh();
+};
+
 // Бейдж «Discord через VPN» на главном экране (C2): ненавязчивый индикатор.
+// Контейнер бейджей показываем, только если активен хотя бы один канал —
+// иначе пустая строка занимала бы место в колонке hero.
+function badgesSync(){
+  const box=$("#badges");
+  if(!box) return;
+  const any=!!(($("#vpnBadge")||{}).classList||{ contains:()=>false }).contains("show")
+         || !!(($("#tgBadge")||{}).classList||{ contains:()=>false }).contains("show");
+  box.classList.toggle("show", any);
+}
 function vpnSetBadge(on){
   const b=$("#vpnBadge");
   if(b) b.classList.toggle("show", !!on);
+  badgesSync();
 }
 window.onVpnState=(on)=>vpnSetBadge(!!on);
 
 // ---------- Обход Telegram (локальный SOCKS5→WebSocket, см. tgproxy.py) ----------
 $("#openTg").onclick=async()=>{ $("#settingsModal").classList.remove("show"); $("#tgModal").classList.add("show"); await tgRefresh(); };
 $("#closeTg").onclick=()=>$("#tgModal").classList.remove("show");
+
+// ---- Свои сайты в обход ----
+function sitesCount(text){
+  const n=(text||"").split(/[\s,]+/).filter(x=>x.trim()).length;
+  $("#sitesCount").textContent="Сайтов в списке: "+n;
+}
+$("#openSites").onclick=async()=>{
+  $("#settingsModal").classList.remove("show");
+  $("#sitesModal").classList.add("show");
+  try{
+    const st=await api().sites_get();
+    $("#sitesText").value=(st&&st.text)||"";
+    sitesCount($("#sitesText").value);
+  }catch(e){ $("#sitesText").value=""; sitesCount(""); }
+};
+$("#closeSites").onclick=()=>$("#sitesModal").classList.remove("show");
+$("#sitesText").oninput=e=>sitesCount(e.target.value);
+$("#sitesSave").onclick=async()=>{
+  const btn=$("#sitesSave"), old=btn.textContent;
+  btn.disabled=true; btn.textContent="Сохраняю…";
+  try{
+    const st=await api().sites_set($("#sitesText").value);
+    if(st && st.ok===false){ toast(st.error||"Не удалось сохранить","warn"); }
+    else if(st){ toast(st.message||"Сохранено","ok"); $("#sitesText").value=st.text||""; sitesCount($("#sitesText").value); }
+  }catch(e){ toast("Ошибка сохранения","warn"); }
+  finally{ btn.disabled=false; btn.textContent=old; }
+};
 
 function tgSetStatus(text, on){
   $("#tgStatusText").textContent=text;
@@ -844,6 +902,7 @@ $("#optTgOn").onchange=async(e)=>{
 function tgSetBadge(on){
   const b=$("#tgBadge");
   if(b) b.classList.toggle("show", !!on);
+  badgesSync();
 }
 window.onTgState=(on)=>tgSetBadge(!!on);
 

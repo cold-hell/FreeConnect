@@ -101,11 +101,15 @@
       </button>
     </div>
     <div class="status-line" id="statusLine">Обход выключен</div>
-    <div class="vpn-badge" id="vpnBadge" title="Весь трафик Discord идёт через твой VPN">
-      <span class="vpn-badge-dot"></span>Discord через VPN
-    </div>
-    <div class="vpn-badge" id="tgBadge" title="Telegram идёт через локальный прокси">
-      <span class="vpn-badge-dot"></span>Telegram через прокси
+    <!-- Бейджи активных каналов — одной аккуратной строкой (при двух включённых
+         они не должны разъезжаться по колонке hero и липнуть к чипам ниже). -->
+    <div class="badges" id="badges">
+      <div class="vpn-badge" id="vpnBadge" title="Весь трафик Discord идёт через твой VPN">
+        <span class="vpn-badge-dot"></span>Discord через VPN
+      </div>
+      <div class="vpn-badge" id="tgBadge" title="Telegram идёт через локальный прокси">
+        <span class="vpn-badge-dot"></span>Telegram через прокси
+      </div>
     </div>
   </section>
 
@@ -275,6 +279,12 @@
         <span class="se-arrow">›</span>
       </button>
 
+      <!-- Продвинутое: свои сайты в обход (пользовательский hostlist) -->
+      <button class="settings-entry" id="openSites">
+        <span class="se-main">Свои сайты в обход<small class="toggle-sub">добавь домены, которые режет провайдер — они попадут под обход наравне с Discord/YouTube</small></span>
+        <span class="se-arrow">›</span>
+      </button>
+
       <button class="btn ghost" id="replayTour" style="width:100%;margin-top:8px">Показать обучение снова</button>
       <button class="btn ghost" id="sendLogs" style="width:100%;margin-top:8px">Собрать логи для поддержки</button>
       <div class="settings-note" id="logsNote">winws.exe часто ложно определяется антивирусом — это нормально для обхода блокировок.</div>
@@ -357,6 +367,28 @@
         <span>Соединение Telegram включено<small class="toggle-sub">пока выключено — Telegram работать не будет</small></span>
         <span class="switch"><input type="checkbox" id="optTgOn"><span class="slider"></span></span>
       </label>
+    </div>
+  </div>
+</div>
+
+<!-- Окно «Свои сайты в обход» (открывается из настроек) -->
+<div class="modal" id="sitesModal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div class="modal-title">Свои сайты в обход</div>
+      <button class="icon-btn" id="closeSites">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="settings-note">Популярные сайты (в т.ч. взрослые и трекеры) уже добавлены —
+        просто включи обход. Ниже можно добавить свои: по одному домену в строке (можно с http:// или
+        www — приведём сами). Попадают под обход наравне с Discord и YouTube; поддомены и кириллические
+        домены поддерживаются. Если сайт блокируют по DNS (трекеры) — включи ещё «Шифровать DNS».</div>
+      <textarea id="sitesText" class="vpn-input vpn-json" style="min-height:150px;margin-top:10px"
+                placeholder="example.com&#10;site.org" autocomplete="off" spellcheck="false"></textarea>
+      <div class="vpn-row" style="margin-top:10px">
+        <span class="settings-note" id="sitesCount" style="flex:1">Сайтов в списке: 0</span>
+        <button class="btn primary small" id="sitesSave">Сохранить</button>
+      </div>
     </div>
   </div>
 </div>

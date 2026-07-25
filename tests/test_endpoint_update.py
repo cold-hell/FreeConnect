@@ -35,6 +35,21 @@ class TestValidation(unittest.TestCase):
         self.assertEqual(len(eu._valid({"endpoints": {"2": many}})["2"]), eu.MAX_PER_DC)
 
 
+class TestValidCf(unittest.TestCase):
+    def test_keeps_valid_domains(self):
+        got = eu._valid_cf({"cf_domains": ["Relay.Example.Com", "bad domain", "ok.net"]})
+        self.assertEqual(got, ["relay.example.com", "ok.net"])   # нормализует регистр, чистит мусор
+
+    def test_drops_garbage(self):
+        for bad in (None, [], "строка", {"cf_domains": None},
+                    {"cf_domains": ["nodot", "", 123]}):
+            self.assertEqual(eu._valid_cf(bad), [])
+
+    def test_caps_length(self):
+        many = [f"d{i}.example.com" for i in range(20)]
+        self.assertEqual(len(eu._valid_cf({"cf_domains": many})), eu.MAX_CF_DOMAINS)
+
+
 class TestMerge(unittest.TestCase):
     def test_remote_first_local_kept(self):
         # Локально найденный адрес терять нельзя: у этого провайдера может работать он.
@@ -112,6 +127,18 @@ class TestFetch(unittest.TestCase):
         self.assertEqual(eps, {})
         self.assertTrue(err)
 
+    def test_fetch_cf_domains_from_github(self):
+        self._patch(True, github={"cf_domains": ["relay.example.com"]})
+        doms, err = eu.fetch_cf_domains()
+        self.assertEqual(doms, ["relay.example.com"])
+        self.assertEqual(err, "")
+
+    def test_fetch_cf_domains_from_mirror(self):
+        self._patch(False, mirror=_zip_with(eu.ENDPOINTS_PATH,
+                                            {"cf_domains": ["relay.example.com"]}))
+        doms, err = eu.fetch_cf_domains()
+        self.assertEqual(doms, ["relay.example.com"])
+
 
 class TestMaybeUpdate(unittest.TestCase):
     def _run(self, cfg, remote, err=""):
@@ -152,6 +179,47 @@ class TestMaybeUpdate(unittest.TestCase):
         (merged, why), saved = self._run({}, {}, err="зеркало недоступно")
         self.assertEqual(merged, {})
         self.assertIn("зеркало", why)
+
+
+class TestMaybeUpdateCf(unittest.TestCase):
+    def _run(self, cfg, remote, err=""):
+        from freeconnect import config
+        saved = {}
+        orig_load, orig_save = config.load, config.save
+        orig_fetch = eu.fetch_cf_domains
+        config.load = lambda: dict(cfg)
+        config.save = lambda c: saved.update(c)
+        eu.fetch_cf_domains = lambda timeout=10.0: (remote, err)
+        try:
+            return eu.maybe_update_cf_domains(), saved
+        finally:
+            config.load, config.save = orig_load, orig_save
+            eu.fetch_cf_domains = orig_fetch
+
+    def test_skips_when_recently_checked(self):
+        import time
+        (doms, why), saved = self._run(
+            {"tg_cf_updated_at": time.time()}, ["relay.example.com"])
+        self.assertEqual(doms, [])
+        self.assertIn("недавно", why)
+        self.assertEqual(saved, {})
+
+    def test_applies_and_persists(self):
+        (doms, why), saved = self._run({}, ["relay.example.com"])
+        self.assertEqual(doms, ["relay.example.com"])
+        self.assertEqual(saved["tg_cf_domains"], ["relay.example.com"])
+        self.assertTrue(saved["tg_cf_updated_at"])
+
+    def test_no_change_records_check_time(self):
+        cfg = {"tg_cf_domains": ["relay.example.com"]}
+        (doms, why), saved = self._run(cfg, ["relay.example.com"])
+        self.assertEqual(doms, [])
+        self.assertTrue(saved["tg_cf_updated_at"])
+
+    def test_channel_failure_not_fatal(self):
+        (doms, why), saved = self._run({}, [], err="зеркало недоступно")
+        self.assertEqual(doms, [])
+        self.assertTrue(saved["tg_cf_updated_at"])   # время проверки записали
 
 
 if __name__ == "__main__":

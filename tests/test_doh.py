@@ -44,23 +44,53 @@ class TestDNSWire(unittest.TestCase):
 
 
 class TestDoHForward(unittest.TestCase):
-    def test_fallback_to_second_resolver(self):
-        calls = []
+    def test_valid_answer_wins_when_one_resolver_broken(self):
+        # Резолверы опрашиваются параллельно; сломанный (cert/таймаут) не должен мешать
+        # рабочему ответить. Иначе прокси затыкается на сломанном и молчит.
+        good = _resp(0, 1)
         def fake_urlopen(req, timeout=None):
-            calls.append(req.full_url)
-            if len(calls) == 1:
-                raise OSError("первый резолвер задушен")
-            return _FakeResp(b"RESPONSE")
+            if "1.1.1.1" in req.full_url:
+                raise OSError("этот резолвер сломан")
+            return _FakeResp(good)
         with mock.patch.object(doh.urllib.request, "urlopen", fake_urlopen):
-            out = doh._doh_query(b"QUERY", timeout=1.0)
-        self.assertEqual(out, b"RESPONSE")
-        self.assertEqual(len(calls), 2)                        # упал первый -> пошли на второй
+            out = doh._doh_query(b"Q", timeout=1.0)
+        self.assertEqual(out, good)
+
+    def test_invalid_response_rejected(self):
+        # Мусор вместо валидного DNS-ответа не принимаем (иначе вернём подмену).
+        def fake_urlopen(req, timeout=None):
+            return _FakeResp(b"not-a-dns-answer")
+        with mock.patch.object(doh.urllib.request, "urlopen", fake_urlopen):
+            self.assertIsNone(doh._doh_query(b"Q", timeout=1.0))
 
     def test_all_resolvers_fail_returns_none(self):
         def fake_urlopen(req, timeout=None):
-            raise OSError("оба недоступны")
+            raise OSError("все недоступны")
         with mock.patch.object(doh.urllib.request, "urlopen", fake_urlopen):
             self.assertIsNone(doh._doh_query(b"Q", timeout=1.0))
+
+
+class TestResolverOrder(unittest.TestCase):
+    def test_cloudflare_before_google(self):
+        # В РФ IP Google душат: если 8.8.8.8 впереди, каждый запрос висит на его
+        # таймауте, DoH тормозит и система откатывается на подменяемый plaintext.
+        urls = doh._DOH_URLS
+        cf = next(i for i, u in enumerate(urls) if "1.1.1.1" in u)
+        goog = next(i for i, u in enumerate(urls) if "8.8.8.8" in u)
+        self.assertLess(cf, goog, "Cloudflare должен опрашиваться раньше Google")
+
+
+class TestPsEncoding(unittest.TestCase):
+    def test_ps_decodes_non_utf8_without_crashing(self):
+        # Имена адаптеров на русской Windows кириллические и приходят не в UTF-8.
+        # _ps не должен падать на декоде (иначе адаптер «теряется» и DoH не включается).
+        class _P:
+            returncode = 0
+            stdout = "Беспроводная сеть".encode("cp866")  # OEM-байты, не UTF-8
+        with mock.patch.object(doh.subprocess, "run", lambda *a, **k: _P()):
+            rc, out = doh._ps("dummy")
+        self.assertEqual(rc, 0)
+        self.assertIsInstance(out, str)   # не упало, вернулась строка
 
 
 if __name__ == "__main__":

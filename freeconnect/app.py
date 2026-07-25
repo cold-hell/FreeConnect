@@ -246,6 +246,11 @@ class Api:
         # Best-effort и полностью отдельно от winws (см. singbox.py). Серверы восстанавливаем
         # из кэша конфига при старте, чтобы список был доступен без повторного импорта.
         self.singbox = SingBox(log=_log)
+        # Лёгкий пробник серверов: свой конфиг/лог, БЕЗ TUN и без прав админа,
+        # чужие sing-box не глушит. Им перебираем кандидатов, не трогая системную сеть.
+        self._vpn_probe = SingBox(log=_log, name="singbox-probe", kill_others=False)
+        self._vpn_cancel = threading.Event()   # «выключили, пока шло подключение»
+        self._vpn_connecting = False
         self._vpn_servers: list = []
         try:
             cached = self.cfg.get("vpn_config", "")
@@ -253,10 +258,15 @@ class Api:
                 self._vpn_servers = vpn.parse_servers(cached)
         except Exception as e:  # noqa: BLE001
             _log(f"vpn: не разобрал кэш подписки: {e}")
+        # Свои сайты: при первом запуске (и при повышении SEED_VERSION) домешиваем
+        # популярные домены в пользовательский hostlist — чтобы порнхаб/трекеры и пр.
+        # работали из коробки, а не заводились по одному домену вручную.
+        self._seed_default_sites()
         # Обход Telegram: локальный SOCKS5→WebSocket прокси (см. tgproxy.py). Полностью
         # отдельно от winws/sing-box, прав админа не требует. Best-effort.
         self.tgproxy = TgProxy(log=_log,
-                               endpoints=self.cfg.get("tg_endpoints") or None)
+                               endpoints=self.cfg.get("tg_endpoints") or None,
+                               cf_domains=self.cfg.get("tg_cf_domains") or None)
         self._tg_discovering = False   # идёт ли фоновый поиск живого адреса
         # Пассивный детектор голоса (эксперим., по умолчанию выкл): наблюдает реальный
         # медиапоток Discord через WinDivert SNIFF и ловит односторонний/мёртвый голос,
@@ -439,6 +449,8 @@ class Api:
                 paths.LOG_DIR / "debug.log",
                 paths.LOG_DIR / "debug.prev.log",  # прошлая сессия (до перезапуска/апдейта)
                 paths.LOG_DIR / "winws.log",
+                paths.LOG_DIR / "singbox.log",     # ошибки туннеля VPN (без них VPN не разобрать)
+                paths.RUNTIME_DIR / "singbox.json",  # какой именно конфиг подняли
                 paths.CONFIG_PATH,
             ]
             try:
@@ -559,6 +571,14 @@ class Api:
                 _log(f"tg endpoints (bg): обновлены -> {merged}")
             else:
                 _log(f"tg endpoints (bg): без изменений ({err})")
+            # Резервные Cloudflare-домены (страховка, когда прямые IP придушат).
+            cf, cf_err = endpoint_update.maybe_update_cf_domains()
+            if cf:
+                self.cfg["tg_cf_domains"] = cf
+                self.tgproxy.set_cf_domains(cf)
+                _log(f"tg cf-domains (bg): обновлены -> {cf}")
+            else:
+                _log(f"tg cf-domains (bg): без изменений ({cf_err})")
         except Exception as e:  # noqa: BLE001
             _log(f"tg endpoints (bg) failed: {e}")
 
@@ -823,6 +843,50 @@ class Api:
                 self._voicewatch = None
         return self.get_settings()
 
+    # ---- Свои сайты в обход (пользовательский hostlist winws) ----
+    def _seed_default_sites(self) -> None:
+        """Досыпает популярные домены по умолчанию, если набор ещё не засеян (или
+        появилась новая версия набора). Пользовательские домены не трогаем."""
+        from . import sites
+        try:
+            if int(self.cfg.get("sites_seed_version", 0)) < sites.SEED_VERSION:
+                n = sites.merge_defaults()
+                self.cfg["sites_seed_version"] = sites.SEED_VERSION
+                config.save(self.cfg)
+                _log(f"sites: засеяны популярные домены (всего в списке {n})")
+        except Exception as e:  # noqa: BLE001
+            _log(f"sites seed failed: {e}")
+
+    def sites_get(self) -> dict:
+        """Текущий список своих доменов для окна настроек."""
+        from . import sites
+        domains = sites.read_domains()
+        return {"text": "\n".join(domains), "count": len(domains)}
+
+    def sites_set(self, text: str = "") -> dict:
+        """Сохраняет свой список доменов в hostlist и, если обход включён,
+        перезапускает winws, чтобы новые сайты сразу попали под обход."""
+        from . import sites
+        domains = sites.parse(text)
+        try:
+            sites.write_domains(domains)
+        except Exception as e:  # noqa: BLE001
+            _log(f"sites: не удалось записать список: {e}")
+            return {"ok": False, "error": "Не удалось сохранить список",
+                    "text": text, "count": len(domains)}
+        _log(f"sites: сохранено своих доменов: {len(domains)}")
+        applied = False
+        if self.enabled:
+            self.enable()            # перечитать hostlist движком
+            applied = True
+        msg = f"Сохранено сайтов: {len(domains)}"
+        if applied:
+            msg += " — уже в обходе"
+        elif domains:
+            msg += " — включи обход, чтобы применить"
+        return {"ok": True, "count": len(domains),
+                "text": "\n".join(domains), "message": msg}
+
     # ---- VPN-для-Discord ----
     _VPN_PROTO = {"hysteria2": "Hysteria2", "vless-reality": "VLESS-Reality",
                   "trojan-reality": "Trojan-Reality"}
@@ -830,28 +894,55 @@ class Api:
     def _vpn_country_ru(self, country: str) -> str:
         return vpn.COUNTRIES.get(country, ("", "Сервер"))[1]
 
+    _VPN_OTHER = "__other__"   # ключ строки-корзины для серверов без опознанной страны
+
     def _vpn_server_rows(self) -> list:
-        """Список стран для UI: по одной строке на страну (лучший протокол —
-        серверы уже отсортированы Hysteria2→VLESS→Trojan, поэтому берём первый)."""
-        rows, seen = [], set()
+        """Список для UI: ПО СТРОКЕ НА СТРАНУ (как в клиентах подписки), а не на
+        каждый сервер — иначе из большой подписки вываливаются сотни строк. Внутри
+        страны конкретный (живой) сервер выберется при подключении. Серверы без
+        опознанной страны собираем в одну строку «Другие»."""
+        order, groups = [], {}
         for s in self._vpn_servers:
-            if s.country in seen:
-                continue
-            seen.add(s.country)
-            rows.append({"id": s.country, "country": s.country,
-                         "name": self._vpn_country_ru(s.country),
-                         "sub": self._VPN_PROTO.get(s.kind, s.kind)})
+            key = s.country or self._VPN_OTHER
+            if key not in groups:
+                groups[key] = []
+                order.append(key)
+            groups[key].append(s)
+        rows = []
+        for key in order:
+            servs = groups[key]
+            best = servs[0]                       # список уже отсортирован по приоритету протокола
+            proto = self._VPN_PROTO.get(best.kind, best.kind)
+            n = len(servs)
+            sub = proto if n == 1 else f"{proto} · {n} серв."
+            name = "🌍 Другие" if key == self._VPN_OTHER else self._vpn_country_ru(key)
+            rows.append({"id": key,
+                         "country": "auto" if key == self._VPN_OTHER else key,
+                         "name": name, "sub": sub})
         return rows
 
+    def _vpn_selected(self) -> str:
+        """Выбранная страна ('' = авто, слаг страны, или __other__)."""
+        return self.cfg.get("vpn_country", "") or ""
+
+    def _vpn_pool_for(self, sel: str) -> list:
+        """Серверы-кандидаты под выбор: авто = все; страна = серверы этой страны;
+        __other__ = серверы без опознанной страны."""
+        if not sel:
+            return list(self._vpn_servers)
+        if sel == self._VPN_OTHER:
+            return [s for s in self._vpn_servers if not s.country]
+        return [s for s in self._vpn_servers if s.country == sel]
+
     def _vpn_title(self, server) -> str:
-        return f"{self._vpn_country_ru(server.country)} · {self._VPN_PROTO.get(server.kind, server.kind)}"
+        return server.name or f"{self._vpn_country_ru(server.country)} · {self._VPN_PROTO.get(server.kind, server.kind)}"
 
     def vpn_get_state(self) -> dict:
         return {
             "available": self.singbox.available(),   # забандлен ли бинарник sing-box
             "imported": bool(self._vpn_servers),
             "servers": self._vpn_server_rows(),
-            "selected": self.cfg.get("vpn_country", "") or "auto",
+            "selected": self._vpn_selected() or "auto",
             "enabled": self.singbox.is_running(),
             "sub_url": self.cfg.get("vpn_sub_url", ""),
         }
@@ -927,26 +1018,32 @@ class Api:
         return st
 
     def vpn_select(self, country: str = "") -> dict:
-        """Выбор страны-выхода ('auto' = лучший по приоритету). Если туннель уже
-        поднят — перезапускаем на новый сервер."""
-        country = (country or "").strip()
-        if country == "auto":
-            country = ""
-        self.cfg["vpn_country"] = country
+        """Выбор страны-выхода ('auto' = любая, живой по приоритету; '__other__' =
+        прочие). Конкретный сервер внутри страны подбирается по живости при включении.
+        Если туннель уже поднят — перезапускаем на новый выбор."""
+        sel = (country or "").strip()
+        if sel == "auto":
+            sel = ""
+        self.cfg["vpn_country"] = sel
         config.save(self.cfg)
         if self.singbox.is_running():
             return self.vpn_set_enabled(True)
         return {**self.vpn_get_state(), "ok": True}
 
     def vpn_set_enabled(self, on) -> dict:
-        """Включить/выключить туннель. On: строим конфиг под выбранный сервер и
-        запускаем sing-box; Off: гасим. Обход winws при этом не трогаем."""
+        """Включить/выключить туннель.
+
+        Включение идёт В ФОНЕ: подбор рабочего сервера занимает секунды, а раньше он
+        выполнялся прямо в вызове из UI — окно подвисало и тумблер «не выключался».
+        Итог подключения прилетает событием onVpnResult."""
         on = bool(on)
         if not on:
-            try:
-                self.singbox.stop()
-            except Exception as e:  # noqa: BLE001
-                _log(f"vpn stop: {e}")
+            self._vpn_cancel.set()          # прервать идущий подбор, если он есть
+            for engine in (self._vpn_probe, self.singbox):
+                try:
+                    engine.stop()
+                except Exception as e:  # noqa: BLE001
+                    _log(f"vpn stop: {e}")
             self.cfg["vpn_enabled"] = False
             config.save(self.cfg)
             self._push("onVpnState", False)
@@ -954,24 +1051,145 @@ class Api:
 
         if not self._vpn_servers:
             return {**self.vpn_get_state(), "ok": False, "error": "Сначала импортируй подписку"}
-        country = self.cfg.get("vpn_country", "") or None
-        server = vpn.best_server(self._vpn_servers, country=country)
-        if not server:
-            return {**self.vpn_get_state(), "ok": False, "error": "Нет сервера для выбранной страны"}
+        if self._vpn_connecting:
+            return {**self.vpn_get_state(), "ok": True, "connecting": True,
+                    "message": "Подключение уже идёт…"}
+
+        self._vpn_cancel.clear()
+        self._vpn_connecting = True
+        threading.Thread(target=self._vpn_connect_worker, daemon=True,
+                         name="vpn-connect").start()
+        return {**self.vpn_get_state(), "ok": True, "connecting": True,
+                "message": "Подбираю рабочий сервер…"}
+
+    def _vpn_probe_engine(self, idx: int):
+        """Экземпляр sing-box под проверку. Нулевой — общий (его же видят тесты),
+        остальные создаются на лету для параллельных проб."""
+        if idx == 0:
+            return self._vpn_probe
+        return SingBox(log=_log, name=f"singbox-probe{idx}", kill_others=False)
+
+    def _vpn_probe_server(self, cand, idx: int = 0) -> bool:
+        """Проверка ОДНОГО сервера без TUN: поднимаем лёгкий socks-конфиг и смотрим,
+        реально ли через него ходит трафик. Системную сеть не трогаем."""
+        engine = self._vpn_probe_engine(idx)
+        port = vpn.free_local_port()
         try:
-            self.singbox.start(vpn.build_singbox_config(server))
-        except SingBoxError as e:
-            return {**self.vpn_get_state(), "ok": False, "error": str(e)}
+            engine.start(vpn.build_probe_config(cand, port), settle=1.2)
         except Exception as e:  # noqa: BLE001
-            _log(f"vpn start: {e}")
-            return {**self.vpn_get_state(), "ok": False, "error": f"Не удалось поднять туннель: {e}"}
-        self.cfg["vpn_enabled"] = True
-        config.save(self.cfg)
-        self._push("onVpnState", True)
-        st = self.vpn_get_state()
-        st["ok"] = True
-        st["message"] = f"Discord идёт через VPN: {self._vpn_title(server)}"
-        return st
+            _log(f"vpn: пробник не поднялся для '{self._vpn_title(cand)}' — {e}")
+            return False
+        try:
+            # 7с: цепочка (вход + зарубежный выход) отвечает медленнее прямого сервера,
+            # на коротком таймауте рабочие маршруты отбраковывались.
+            return vpn.tunnel_works(port, timeout=8.0)
+        finally:
+            try:
+                engine.stop()
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _vpn_find_working(self, candidates: list, batch: int = 4, limit: int = 24):
+        """Ищет сервер, через который РЕАЛЬНО идёт трафик.
+
+        Проверяем пачками параллельно: в этой подписке живых серверов заметно меньше
+        половины, и последовательный перебор по одному занимал бы минуты."""
+        import concurrent.futures as cf
+        pool = candidates[:limit]
+        checked = 0
+        for start in range(0, len(pool), batch):
+            if self._vpn_cancel.is_set():
+                return None
+            chunk = pool[start:start + batch]
+            self._push("onVpnProgress", {"done": checked, "total": len(pool)})
+            good: set[str] = set()
+            with cf.ThreadPoolExecutor(max_workers=len(chunk)) as ex:
+                futs = {ex.submit(self._vpn_probe_server, c, i): c
+                        for i, c in enumerate(chunk)}
+                for fut in cf.as_completed(futs):
+                    cand = futs[fut]
+                    try:
+                        if fut.result():
+                            good.add(cand.uid())
+                    except Exception as e:  # noqa: BLE001
+                        _log(f"vpn: проба '{self._vpn_title(cand)}' сорвалась — {e}")
+            checked += len(chunk)
+            for cand in chunk:                 # держим исходный приоритет
+                if cand.uid() in good:
+                    return cand
+            _log(f"vpn: пачка из {len(chunk)} серверов не пропустила трафик — дальше")
+        self._push("onVpnProgress", {"done": checked, "total": len(pool)})
+        return None
+
+    def _vpn_connect_worker(self) -> None:
+        """Фоновый подбор: находим сервер, через который РЕАЛЬНО идёт трафик, и только
+        для него поднимаем TUN. Раньше TUN поднимался на каждого кандидата — адаптер не
+        успевал освобождаться («file already exists») и рвалась вся сеть."""
+        ok, message, error = False, "", ""
+        try:
+            sel = self._vpn_selected()
+            pool = self._vpn_pool_for(sel) or list(self._vpn_servers)
+            candidates = vpn.live_candidates(pool)
+            if not candidates:
+                error = "Нет доступных серверов"
+                return
+
+            winner = self._vpn_find_working(candidates)
+            if self._vpn_cancel.is_set():
+                _log("vpn: подбор отменён пользователем")
+                return
+            if winner is None:
+                checked = min(len(candidates), 24)
+                where = "в этой стране" if self._vpn_selected() else "в подписке"
+                error = (f"Проверено серверов {where}: {checked} — ни один не отвечает. "
+                         f"Попробуй другую страну или «Авто».")
+                return
+            _log(f"vpn: '{self._vpn_title(winner)}' — трафик идёт, поднимаю туннель")
+            if self._vpn_cancel.is_set():
+                return
+
+            # TUN поднимаем один раз — уже для проверенного сервера. Адаптер мог
+            # остаться занятым от прошлого запуска, поэтому одна повторная попытка.
+            last = None
+            for attempt in range(2):
+                try:
+                    self.singbox.start(vpn.build_singbox_config(winner))
+                    last = None
+                    break
+                except Exception as e:  # noqa: BLE001
+                    last = e
+                    _log(f"vpn: туннель не поднялся ({e}) — попытка {attempt + 1}")
+                    try:
+                        self.singbox.stop()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    time.sleep(1.5)
+            if last is not None:
+                error = f"Не удалось поднять туннель: {last}"
+                return
+
+            self.cfg["vpn_enabled"] = True
+            config.save(self.cfg)
+            ok = True
+            message = f"Discord идёт через VPN: {self._vpn_title(winner)}"
+            _log(f"vpn: подключено — {self._vpn_title(winner)}")
+        except Exception as e:  # noqa: BLE001
+            error = f"Ошибка подключения: {e}"
+            _log(f"vpn connect worker: {e}")
+        finally:
+            self._vpn_connecting = False
+            if not ok:
+                # Не оставляем поднятый TUN с нерабочим выходом: без сети Discord
+                # чувствует себя хуже, чем вообще без VPN.
+                try:
+                    self.singbox.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+                if not self._vpn_cancel.is_set():
+                    self.cfg["vpn_enabled"] = False
+                    config.save(self.cfg)
+            self._push("onVpnState", ok)
+            self._push("onVpnResult", {"ok": ok, "message": message, "error": error})
 
     # ---- Обход Telegram (локальный SOCKS5→WebSocket, см. tgproxy.py) ----
     def tg_get_state(self) -> dict:
@@ -1834,6 +2052,11 @@ def run(argv: list[str] | None = None) -> None:
         min_size=(480, 760),
         background_color="#070912",
         frameless=api.frameless,
+        # easy_drag у pywebview для frameless-окон включён ПО УМОЛЧАНИЮ и позволяет
+        # тащить окно за ЛЮБУЮ точку — из-за этого зажатие ЛКМ в текстовом поле
+        # двигало окно вместо выделения текста. Выключаем: тащить можно за полосу
+        # .pywebview-drag-region (шапка), а в полях работает нормальное выделение.
+        easy_drag=False,
         hidden=minimized,
     )
     api._win = window

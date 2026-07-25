@@ -44,11 +44,24 @@ class SingBox:
 
     _serializable = False   # pywebview не должен обходить объект при сборке js_api
 
-    def __init__(self, log=None) -> None:
+    def __init__(self, log=None, name: str = "singbox", kill_others: bool = True) -> None:
         self._proc: subprocess.Popen | None = None
         self._logf = None
         self._log = log or (lambda _m: None)
-        self._sb_log = paths.LOG_DIR / "singbox.log"
+        # name разделяет экземпляры: основной туннель и лёгкий пробник серверов
+        # пишут в разные конфиг/лог, чтобы не затирать друг друга.
+        self._name = name
+        # Пробник НЕ должен глушить чужие sing-box (там может жить основной туннель).
+        self._kill_others = kill_others
+
+    # Пути считаем лениво: paths.* может быть подменён (тесты, смена рантайма).
+    @property
+    def _cfg_path(self):
+        return paths.RUNTIME_DIR / f"{self._name}.json"
+
+    @property
+    def _sb_log(self):
+        return paths.LOG_DIR / f"{self._name}.log"
 
     def available(self) -> bool:
         """Забандлен ли бинарник sing-box (иначе фича недоступна)."""
@@ -59,12 +72,12 @@ class SingBox:
 
     def write_config(self, config: dict) -> None:
         paths.ensure_dirs()
-        SINGBOX_CONFIG.write_text(json.dumps(config, ensure_ascii=False, indent=2),
+        self._cfg_path.write_text(json.dumps(config, ensure_ascii=False, indent=2),
                                   encoding="utf-8")
 
     def _cmd(self) -> list[str]:
         # sing-box run -c <config>  (рабочая директория — bin, там бинарник и рантайм)
-        return [str(SINGBOX_EXE), "run", "-c", str(SINGBOX_CONFIG)]
+        return [str(SINGBOX_EXE), "run", "-c", str(self._cfg_path)]
 
     def tail(self, n: int = 5) -> str:
         try:
@@ -82,11 +95,16 @@ class SingBox:
             raise SingBoxError("VPN поддерживается только на Windows")
         if not self.available():
             raise SingBoxError("sing-box не установлен (обнови приложение)")
-        if not is_admin():
+        # Права администратора нужны ТОЛЬКО под TUN. Лёгкий пробник (socks на
+        # localhost) обходится без них — иначе перебор серверов был бы невозможен
+        # без админа и трогал бы системную сеть.
+        needs_tun = any(i.get("type") == "tun" for i in config.get("inbounds", []))
+        if needs_tun and not is_admin():
             raise SingBoxError("Нужны права администратора для TUN")
 
         self.stop()
-        kill_singbox()   # на случай чужих экземпляров
+        if self._kill_others:
+            kill_singbox()   # на случай чужих/зависших экземпляров
         self.write_config(config)
 
         startupinfo = subprocess.STARTUPINFO()
@@ -97,7 +115,7 @@ class SingBox:
         except Exception:
             self._logf = None
         try:
-            self._proc = subprocess.Popen(
+            proc = subprocess.Popen(
                 self._cmd(),
                 cwd=str(paths.BIN_DIR),
                 stdout=(self._logf or subprocess.DEVNULL),
@@ -105,16 +123,23 @@ class SingBox:
                 startupinfo=startupinfo,
                 creationflags=CREATE_NO_WINDOW,
             )
+            self._proc = proc
         except Exception as e:  # noqa: BLE001
             raise SingBoxError(f"Не удалось запустить sing-box: {e}") from e
 
         # Короткая проверка: если процесс сразу упал (кривой конфиг/сервер) — покажем причину.
+        # Держим ЛОКАЛЬНУЮ ссылку proc: если параллельно вызовут stop() (быстрый повторный
+        # клик/переключение сервера), self._proc обнулится, а self._proc.poll() кинет
+        # 'NoneType has no attribute poll' — на локальную ссылку это не влияет.
         import time
         deadline = time.perf_counter() + settle
         while time.perf_counter() < deadline:
-            if self._proc.poll() is not None:
+            if self._proc is not proc:
+                return   # нас вытеснил другой start()/stop() — не мешаем ему
+            if proc.poll() is not None:
                 why = self.tail()
-                self._proc = None
+                if self._proc is proc:
+                    self._proc = None
                 raise SingBoxError(f"sing-box завершился сразу — {why or 'проверь конфиг/сервер'}")
             time.sleep(0.15)
         self._log(f"singbox: запущен ({self.tail(1) or 'ok'})")
@@ -136,4 +161,5 @@ class SingBox:
             except Exception:
                 pass
             self._logf = None
-        kill_singbox()
+        if self._kill_others:
+            kill_singbox()

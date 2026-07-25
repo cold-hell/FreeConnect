@@ -15,14 +15,21 @@
 
 Формат файла:
     {"updated": "2026-07-21",
-     "endpoints": {"2": ["149.154.167.220"], "4": ["149.154.167.220"]}}
+     "endpoints": {"2": ["149.154.167.220"], "4": ["149.154.167.220"]},
+     "cf_domains": ["example.com"]}
 
-Адреса из сети НЕ заменяют локальные, а объединяются с ними: у пользователя может
-быть свой найденный адрес, который работает именно у его провайдера.
+`endpoints` — живые IP веб-входа (в обход DNS). `cf_domains` — резервные Cloudflare-
+домены (за ними релей на веб-вход Telegram): подключаемся к kws{dc}.{домен} через
+обычный DNS, когда прямые IP придушат. Оба поля публикуются здесь, чтобы чинить
+блокировку удалённо, без пересборки приложения.
+
+Данные из сети НЕ заменяют локальные, а объединяются: у пользователя может быть свой
+найденный адрес, который работает именно у его провайдера.
 """
 from __future__ import annotations
 
 import json
+import re
 import time
 import urllib.request
 
@@ -33,7 +40,11 @@ GITHUB_RAW = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/{ENDPOINTS_P
 _UA = {"User-Agent": "FreeConnect"}
 
 MAX_PER_DC = 5          # длинный список дорог: каждый мёртвый адрес — это таймаут
+MAX_CF_DOMAINS = 8
 MIN_INTERVAL_HOURS = 6.0
+CF_MIN_INTERVAL_HOURS = 12.0
+
+_DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?!-)[a-z0-9-]{1,63}(?:\.(?!-)[a-z0-9-]{1,63})+$")
 
 
 def _valid(data) -> dict:
@@ -62,14 +73,47 @@ def _valid(data) -> dict:
     return out
 
 
-def _from_github(timeout: float) -> dict:
-    req = urllib.request.Request(GITHUB_RAW, headers=_UA)
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return _valid(json.loads(r.read().decode("utf-8")))
+def _valid_cf(data) -> list[str]:
+    """Оставляет только валидные доменные имена из cf_domains (base-домены без kws-префикса)."""
+    out: list[str] = []
+    if not isinstance(data, dict):
+        return out
+    for d in (data.get("cf_domains") or []):
+        if not isinstance(d, str):
+            continue
+        d = d.strip().lower()
+        if _DOMAIN_RE.match(d) and d not in out:
+            out.append(d)
+    return out[:MAX_CF_DOMAINS]
 
 
-def _from_mirror(timeout: float) -> dict:
-    """Тот же файл, но из codeload-архива ветки main (zip кладёт файлы в подпапку)."""
+def _fetch_raw(timeout: float) -> tuple[dict | None, str]:
+    """Сырой JSON публикуемого файла: GitHub основной, зеркало — фолбэк.
+    Возвращает (данные или None, ошибка)."""
+    if not MIRROR_LATEST and (not GITHUB_REPO or "__" in GITHUB_REPO):
+        return None, "каналы не настроены"
+    errors = []
+    if github_reachable(timeout=4.0):
+        try:
+            req = urllib.request.Request(GITHUB_RAW, headers=_UA)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8")), ""
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"github: {e}")
+    else:
+        errors.append("github недоступен")
+    try:
+        raw = _mirror_raw(timeout)
+        if raw is not None:
+            return raw, ""
+        errors.append("зеркало: файла нет")
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"зеркало: {e}")
+    return None, "; ".join(errors)
+
+
+def _mirror_raw(timeout: float) -> dict | None:
+    """Сырой JSON из codeload-архива ветки main (zip кладёт файлы в подпапку)."""
     import io
     import zipfile
     req = urllib.request.Request(MIRROR_LATEST, headers=_UA)
@@ -78,34 +122,31 @@ def _from_mirror(timeout: float) -> dict:
     with zipfile.ZipFile(io.BytesIO(data)) as z:
         for m in z.namelist():
             if m == ENDPOINTS_PATH or m.endswith("/" + ENDPOINTS_PATH):
-                return _valid(json.loads(z.read(m).decode("utf-8")))
-    return {}
+                return json.loads(z.read(m).decode("utf-8"))
+    return None
 
 
 def fetch_remote(timeout: float = 10.0) -> tuple[dict, str]:
     """Забирает опубликованные адреса. Возвращает (endpoints, ошибка).
     GitHub основной; если он у пользователя недоступен — зеркало."""
-    if not MIRROR_LATEST and (not GITHUB_REPO or "__" in GITHUB_REPO):
-        return {}, "каналы не настроены"
-    errors = []
-    if github_reachable(timeout=4.0):
-        try:
-            eps = _from_github(timeout)
-            if eps:
-                return eps, ""
-            errors.append("github: файла нет")
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"github: {e}")
-    else:
-        errors.append("github недоступен")
-    try:
-        eps = _from_mirror(timeout)
-        if eps:
-            return eps, ""
-        errors.append("зеркало: файла нет")
-    except Exception as e:  # noqa: BLE001
-        errors.append(f"зеркало: {e}")
-    return {}, "; ".join(errors)
+    raw, err = _fetch_raw(timeout)
+    if raw is None:
+        return {}, err
+    eps = _valid(raw)
+    if eps:
+        return eps, ""
+    return {}, err or "в файле нет адресов"
+
+
+def fetch_cf_domains(timeout: float = 10.0) -> tuple[list[str], str]:
+    """Забирает опубликованные резервные Cloudflare-домены. Возвращает (домены, ошибка)."""
+    raw, err = _fetch_raw(timeout)
+    if raw is None:
+        return [], err
+    doms = _valid_cf(raw)
+    if doms:
+        return doms, ""
+    return [], err or "в файле нет cf_domains"
 
 
 def merge(local: dict | None, remote: dict) -> dict:
@@ -144,3 +185,25 @@ def maybe_update(min_interval_hours: float = MIN_INTERVAL_HOURS) -> tuple[dict, 
         return merged, ""
     config.save(cfg)     # запоминаем время проверки, даже если не изменилось
     return {}, "адреса не изменились"
+
+
+def maybe_update_cf_domains(min_interval_hours: float = CF_MIN_INTERVAL_HOURS) -> tuple[list[str], str]:
+    """Не чаще раза в min_interval_hours подтягивает резервные Cloudflare-домены в
+    конфиг (tg_cf_domains). Возвращает (новый список или [], ошибка/причина пропуска)."""
+    from . import config
+    cfg = config.load()
+    last = cfg.get("tg_cf_updated_at", 0) or 0
+    if time.time() - last < min_interval_hours * 3600:
+        return [], "недавно обновляли — пропуск"
+
+    doms, err = fetch_cf_domains()
+    cfg["tg_cf_updated_at"] = time.time()
+    if not doms:
+        config.save(cfg)     # запоминаем время проверки
+        return [], err or "пусто"
+    if doms != (cfg.get("tg_cf_domains") or []):
+        cfg["tg_cf_domains"] = doms
+        config.save(cfg)
+        return doms, ""
+    config.save(cfg)
+    return [], "домены не изменились"
