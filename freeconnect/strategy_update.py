@@ -157,6 +157,13 @@ def update_from_upstream(min_ok: int = 10, timeout: float = 12.0) -> tuple[int, 
         tmp.replace(paths.STRATEGIES_JSON)  # атомарная замена
     except Exception as e:  # noqa: BLE001
         return 0, f"запись не удалась: {e}"
+    # Апстрим ссылается на блобы, которых у нас нет (живой захват ACTIVE_*.bin, stun2 и
+    # пр.) — иначе winws упадёт на всех новых стратегиях. Докидываем фолбэк-копии.
+    try:
+        from .strategies import ensure_referenced_blobs
+        ensure_referenced_blobs()
+    except Exception:  # noqa: BLE001
+        pass
     return len(strategies), ""
 
 

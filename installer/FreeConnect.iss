@@ -3,7 +3,7 @@
 ; Сборка: ISCC.exe installer\FreeConnect.iss  ->  installer\Output\FreeConnect-Setup.exe
 
 #define MyAppName "FreeConnect"
-#define MyAppVersion "0.4.0"
+#define MyAppVersion "0.4.1"
 #define MyAppPublisher "FreeConnect"
 #define MyAppExeName "FreeConnect.exe"
 

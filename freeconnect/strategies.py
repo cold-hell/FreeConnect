@@ -8,10 +8,64 @@ resolve_args() подставляет реальные абсолютные пу
 from __future__ import annotations
 
 import json
+import re
+import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import paths
+
+# Фолбэк-блобы. winws ПАДАЕТ на старте, если стратегия ссылается на несуществующий
+# .bin («could not read ...»), и тогда ВСЕ стратегии становятся «нерабочими». Апстрим
+# (Flowseal) перешёл на ЖИВОЙ захват пакетов — ACTIVE_DISCORD_UDP.bin/ACTIVE_GAME_UDP.bin
+# создаёт его батник на лету, а ещё ссылается на stun2.bin/quic_initial_4pda.to.bin,
+# которых в нашем наборе нет. Наш strategy_update тянет эти ссылки дословно → winws
+# не находит файлы. Чтобы не зависеть от того, что напишет апстрим, для КАЖДОГО
+# недостающего блоба кладём копию подходящего имеющегося (см. ensure_referenced_blobs).
+_FALLBACK_TLS = "tls_clienthello_www_google_com.bin"   # для *tls*-фейков
+_FALLBACK_DEFAULT = "quic_initial_dbankcloud_ru.bin"   # для discord/quic/stun/udp-фейков
+
+
+def _referenced_blobs(*json_paths: Path) -> set[str]:
+    """Имена всех .bin, на которые ссылаются стратегии ({BIN}/имя.bin)."""
+    refs: set[str] = set()
+    for p in json_paths:
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        refs |= set(re.findall(r"\{BIN\}/([A-Za-z0-9_.\-]+\.bin)", text))
+    return refs
+
+
+def ensure_referenced_blobs(log=None) -> int:
+    """Создаёт фолбэк-копии для блобов, на которые ссылаются стратегии, но которых нет
+    в bin/. Без этого winws не может прочитать файл и падает на старте — и подбор бракует
+    ВСЕ стратегии подряд. Возвращает число созданных файлов. Идемпотентно и безопасно:
+    существующие блобы не трогаем."""
+    log = log or (lambda *_: None)
+    bin_dir = paths.BIN_DIR
+    if not bin_dir.is_dir():
+        return 0
+    have = {p.name for p in bin_dir.glob("*.bin")}
+    if not have:
+        return 0
+    custom_json = paths.APP_HOME / "custom_strategies.json"
+    made = 0
+    for name in sorted(_referenced_blobs(paths.STRATEGIES_JSON, custom_json)):
+        if name in have:
+            continue
+        src = _FALLBACK_TLS if "tls" in name.lower() else _FALLBACK_DEFAULT
+        if src not in have:
+            src = sorted(have)[0]           # хоть что-то читаемое, лишь бы winws не падал
+        try:
+            shutil.copy2(bin_dir / src, bin_dir / name)
+            have.add(name)
+            made += 1
+            log(f"blob fallback: {name} <- {src}")
+        except OSError as e:
+            log(f"blob fallback failed {name}: {e}")
+    return made
 
 
 @dataclass

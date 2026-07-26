@@ -54,6 +54,7 @@ def _provision_runtime() -> None:
         # но ДОКИДЫВАЕМ новые файлы бандла (напр. sing-box.exe для VPN), иначе фича
         # не появится у тех, кто ставит апдейт поверх готового C:\FreeConnect\runtime.
         _provision_missing(src)
+        _ensure_strategy_blobs()
         return
     if not src.is_dir():
         _log(f"provision: встроенный рантайм не найден ({src})")
@@ -71,6 +72,20 @@ def _provision_runtime() -> None:
         except Exception as e:  # noqa: BLE001
             _log(f"provision copy failed {item.name}: {e}")
     _log(f"runtime provisioned -> {paths.RUNTIME_DIR} (ready={paths.runtime_ready()})")
+    _ensure_strategy_blobs()
+
+
+def _ensure_strategy_blobs() -> None:
+    """Гарантирует, что все .bin из strategies.json существуют (иначе winws падает и
+    подбор бракует все стратегии). Апстрим ссылается на живые/чужие блобы — кладём им
+    фолбэк. Best-effort, сбой не должен рушить старт."""
+    try:
+        from . import strategies
+        n = strategies.ensure_referenced_blobs(_log)
+        if n:
+            _log(f"provision: докинуто фолбэк-блобов: {n}")
+    except Exception as e:  # noqa: BLE001
+        _log(f"provision blobs failed: {e}")
 
 
 def _provision_missing(src: Path) -> None:
