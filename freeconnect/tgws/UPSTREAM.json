@@ -1,0 +1,83 @@
+{
+  "repo": "Flowseal/tg-ws-proxy",
+  "ref": "v1.11.2",
+  "version": "1.11.2",
+  "vendored_at": "2026-10-15",
+  "files": {
+    "__init__.py": {
+      "sha256": "9105fa8e044378ecc490613010d9656fbdacf2f9a405f1f54fd043c6553ae2f4",
+      "git_blob_sha1": "1dfff3de7d34e5e153a8d62b7c6669b5e63d71a4",
+      "size": 273
+    },
+    "_aes.py": {
+      "sha256": "5b07f23c1d65140fb933e2c31d42817012d2ff4b60664f69146fe2554d54d528",
+      "git_blob_sha1": "ccdb2ca20721b1e5fe556a9a0bee627edc7cf600",
+      "size": 4591
+    },
+    "balancer.py": {
+      "sha256": "3d4330488b968e146286b14790c0814eae3efe5d0f26206572369ca6368eed24",
+      "git_blob_sha1": "f658b83ce2c22c47c9b7763b2a97b69271361f6d",
+      "size": 1181
+    },
+    "bridge.py": {
+      "sha256": "f857f231472a605df07c9fb5cf4f5661230400c24a1bc46baf9f535f326c5979",
+      "git_blob_sha1": "de64dc79e6fd902d5a01aee97c1d43d551e1f6cc",
+      "size": 17619
+    },
+    "cf_h2.py": {
+      "sha256": "9c2c2b63add1a2568ef472ca9631c55e81a581fbadcc67c322c42fe46ec8b054",
+      "git_blob_sha1": "06c03a83ff6eace523e96490017c85691471b16a",
+      "size": 47412
+    },
+    "config.py": {
+      "sha256": "7d3b83a72d9d91db397a19c25cb5a3b5211f8c5aaf52235b7e03e0bc7293c6be",
+      "git_blob_sha1": "b4a84055ca3ed5fdebed61ef0372f0e3ed24933c",
+      "size": 6642
+    },
+    "event_loop.py": {
+      "sha256": "8b6cb6eca73d2e88721b0414c9eedcabeb5c24d79ae9135e792b3b5410ec040b",
+      "git_blob_sha1": "2da3b104b3294e440e961b6155a40b1bdd231fce",
+      "size": 2602
+    },
+    "fake_tls.py": {
+      "sha256": "ce4ce10990117f96522558bc38f2798630b4b736854fd0bf738ba886332b9cb9",
+      "git_blob_sha1": "ea6379d5df2e4bd6c9ba77bd2d33acca56c0e518",
+      "size": 7226
+    },
+    "h2_transport.py": {
+      "sha256": "3cf17bb062cd09cdc028fd44f1706fc03243ed3b7348162135242a8e4c07fcf9",
+      "git_blob_sha1": "59eaf9e005d53686d9e3a5f9a1df2e169ffcf1ee",
+      "size": 15832
+    },
+    "network_debug.py": {
+      "sha256": "4a4d014c764439df076d15cbbaae819411fd0c5da0cf7fb9b3a630bf0ddeca2d",
+      "git_blob_sha1": "908dd6357f1e9eadcf784f19c6ff07eafc238262",
+      "size": 3750
+    },
+    "pool.py": {
+      "sha256": "5d41504da70b5da36a4533c11f4f3e49491feefa89437d8d05042d8ba296011d",
+      "git_blob_sha1": "7f6d1ea6b1f306758df32c558b222d7e1a45efd8",
+      "size": 15125
+    },
+    "raw_websocket.py": {
+      "sha256": "a5cf8a4c3f783744166c82632440929b3739bef4afdeb67f701b2a7ab60eefa5",
+      "git_blob_sha1": "0f66db2d37bc03411d07c163d27ec76180511280",
+      "size": 10030
+    },
+    "stats.py": {
+      "sha256": "4a54b09e384d77677e48bef81ac0ecfc201278ec5462aafd7ce4a5edd91270a7",
+      "git_blob_sha1": "32cbbd77da31d2f39cdb998dcaadbef31f9627d6",
+      "size": 1879
+    },
+    "tg_ws_proxy.py": {
+      "sha256": "88001618657b97c861ba441ee08284e4954ee7b7959625b91e19a3ec627d46ac",
+      "git_blob_sha1": "d81baf75054823fbfdab0c413a09cb867791e575",
+      "size": 25673
+    },
+    "utils.py": {
+      "sha256": "7a9cd428b3bc97a8b14899eb5e37b395dfa5547e66c4a29d578b5ddbc486ffbd",
+      "git_blob_sha1": "930965e87b80a428a001307370160dffb7075b7a",
+      "size": 4526
+    }
+  }
+}

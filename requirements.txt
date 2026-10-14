@@ -1,9 +1,14 @@
 # Зависимости FreeConnect. Нижняя граница версий — то, на чём собрано и проверено;
 # верхнюю не фиксируем, чтобы ловить проблемы совместимости заранее.
 
-# Соединение Telegram: локальный SOCKS5 -> WebSocket к веб-каналу Telegram.
-websockets>=15.0        # клиент WebSocket (принимает готовый сокет + SNI)
-cryptography>=44.0      # AES-256-CTR: разбор obfuscated2 init-пакета -> номер ДЦ
+# Соединение Telegram: локальный MTProto-прокси -> WebSocket к веб-каналу Telegram.
+# Ядро вендорено из Flowseal/tg-ws-proxy (MIT) в freeconnect/tgws — см.
+# freeconnect/tgws/UPSTREAM.md и THIRD_PARTY_NOTICES.md.
+cryptography>=44.0      # AES-256-CTR: obfuscated2 init-пакет, перешифровка потока
+httpx>=0.28.1           # HTTP/2-мультиплексирование медиа через Cloudflare
+h2>=4.1                 # низкоуровневый HTTP/2 (используется ядром напрямую)
+certifi>=2024.0         # CA-бандл для TLS-проверок ядра
+websockets>=15.0        # пока нужен старым тестам tgproxy; уйдёт вместе со старым модулем
 
 # GUI и трей. В юнит-тестах не нужны (app.py импортирует их лениво), но входят
 # в реальную сборку — держим здесь, чтобы окружение было воспроизводимым.

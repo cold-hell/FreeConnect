@@ -277,12 +277,10 @@ class Api:
         # популярные домены в пользовательский hostlist — чтобы порнхаб/трекеры и пр.
         # работали из коробки, а не заводились по одному домену вручную.
         self._seed_default_sites()
-        # Обход Telegram: локальный SOCKS5→WebSocket прокси (см. tgproxy.py). Полностью
-        # отдельно от winws/sing-box, прав админа не требует. Best-effort.
-        self.tgproxy = TgProxy(log=_log,
-                               endpoints=self.cfg.get("tg_endpoints") or None,
-                               cf_domains=self.cfg.get("tg_cf_domains") or None)
-        self._tg_discovering = False   # идёт ли фоновый поиск живого адреса
+        # Соединение Telegram: локальный MTProto-прокси (ядро Flowseal/tg-ws-proxy,
+        # вендорено в freeconnect/tgws — см. tgproxy.py). Полностью отдельно от
+        # winws/sing-box, прав администратора не требует. Best-effort.
+        self.tgproxy = TgProxy(log=_log)
         # Пассивный детектор голоса (эксперим., по умолчанию выкл): наблюдает реальный
         # медиапоток Discord через WinDivert SNIFF и ловит односторонний/мёртвый голос,
         # который STUN-монитор и watchdog не видят. Best-effort: сбой не рушит обход.
@@ -572,30 +570,24 @@ class Api:
         threading.Thread(target=self._bg_update_strategies, daemon=True).start()
         # Проверка новой версии самого приложения (GitHub Releases) — тоже в фоне.
         threading.Thread(target=self._bg_check_update, daemon=True).start()
-        # Свежие адреса веб-входа Telegram из нашего канала: если зашитый адрес
-        # заблокируют, обход починится сам, без действий пользователя.
-        threading.Thread(target=self._bg_update_tg_endpoints, daemon=True).start()
+        # Свежесть ядра обхода Telegram (Flowseal/tg-ws-proxy): один быстрый запрос
+        # к GitHub Releases. Само ядро меняется только вместе с релизом FreeConnect.
+        threading.Thread(target=self._bg_check_tg_core, daemon=True).start()
 
-    def _bg_update_tg_endpoints(self) -> None:
+    def _bg_check_tg_core(self) -> None:
+        """Фоновая проверка, нет ли у ядра Telegram более новой версии."""
         try:
-            from . import endpoint_update
-            merged, err = endpoint_update.maybe_update()
-            if merged:
-                self.cfg["tg_endpoints"] = merged
-                self.tgproxy.set_endpoints(merged)
-                _log(f"tg endpoints (bg): обновлены -> {merged}")
-            else:
-                _log(f"tg endpoints (bg): без изменений ({err})")
-            # Резервные Cloudflare-домены (страховка, когда прямые IP придушат).
-            cf, cf_err = endpoint_update.maybe_update_cf_domains()
-            if cf:
-                self.cfg["tg_cf_domains"] = cf
-                self.tgproxy.set_cf_domains(cf)
-                _log(f"tg cf-domains (bg): обновлены -> {cf}")
-            else:
-                _log(f"tg cf-domains (bg): без изменений ({cf_err})")
+            from . import tgws_update
+            info = tgws_update.maybe_check(self.cfg)
+            if info.get("checked"):
+                config.save(self.cfg)
+            if info.get("available"):
+                _log(f"tgws: доступно обновление ядра {info.get('latest')} "
+                     f"(у нас {info.get('local')})")
+            elif info.get("error"):
+                _log(f"tgws update check: {info['error']}")
         except Exception as e:  # noqa: BLE001
-            _log(f"tg endpoints (bg) failed: {e}")
+            _log(f"tgws update check failed: {e}")
 
     def _bg_update_strategies(self) -> None:
         try:
@@ -1206,25 +1198,48 @@ class Api:
             self._push("onVpnState", ok)
             self._push("onVpnResult", {"ok": ok, "message": message, "error": error})
 
-    # ---- Обход Telegram (локальный SOCKS5→WebSocket, см. tgproxy.py) ----
+    # ---- Соединение Telegram (локальный MTProto-прокси, см. tgproxy.py) ----
+    def _tg_secret(self) -> str:
+        """Секрет прокси. Генерируем один раз и храним в конфиге: от него зависит
+        ссылка, которую пользователь добавил в Telegram, — она не должна меняться
+        от запуска к запуску, иначе придётся добавлять прокси заново."""
+        secret = str(self.cfg.get("tg_secret") or "").strip()
+        if len(secret) != 32:
+            secret = os.urandom(16).hex()
+            self.cfg["tg_secret"] = secret
+            config.save(self.cfg)
+        return secret
+
     def tg_get_state(self) -> dict:
-        port = int(self.cfg.get("tg_port", tgproxy.DEFAULT_PORT))
+        st = self.tgproxy.status()
+        port = st.get("port") or int(self.cfg.get("tg_port", tgproxy.DEFAULT_PORT))
+        link = st.get("link") or tgproxy.deeplink(
+            port, tgproxy.LOCAL_HOST, self._tg_secret(),
+            str(self.cfg.get("tg_faketls") or ""))
         return {
-            "available": self.tgproxy.available(),   # есть ли зависимости (всегда для нашей сборки)
-            "enabled": self.tgproxy.is_running(),
+            "available": st.get("available", False),
+            "enabled": st.get("running", False),
+            "running": st.get("running", False),
             "port": port,
             "host": tgproxy.LOCAL_HOST,
-            "deeplink": tgproxy.deeplink(port),
-            # Telegram настроен ходить через наш прокси, поэтому без запущенного
-            # FreeConnect он не работает вовсе. Если автозапуск выключен — UI
-            # предупредит, иначе после перезагрузки человек решит, что сломался
-            # Telegram, а не поймёт, что надо запустить программу.
+            "link": link,
+            "deeplink": link,           # старое имя поля — чтобы не ломать UI
+            "version": st.get("version", ""),
+            "core_latest": str(self.cfg.get("tg_core_latest") or ""),
+            "cfproxy": bool(self.cfg.get("tg_cfproxy", True)),
+            "h2": bool(self.cfg.get("tg_h2", True)),
+            "cf_domains": list(self.cfg.get("tg_cf_domains") or []),
+            "faketls": str(self.cfg.get("tg_faketls") or ""),
+            # Telegram ходит через наш локальный прокси, поэтому без запущенного
+            # FreeConnect связи не будет. Если автозапуск выключен — UI предупредит,
+            # иначе после перезагрузки человек решит, что сломался Telegram.
             "autostart": bool(self.cfg.get("autostart", False)),
+            "error": st.get("error", ""),
         }
 
     def tg_set_enabled(self, on) -> dict:
-        """Включить/выключить прокси Telegram. On: поднять SOCKS5; Off: погасить.
-        winws/VPN при этом не трогаем — они независимы."""
+        """Включить/выключить соединение Telegram. Ядро при старте само прогревает
+        пул WebSocket и подтягивает список резервных доменов. winws/VPN не трогаем."""
         on = bool(on)
         if not on:
             try:
@@ -1238,111 +1253,128 @@ class Api:
 
         port = int(self.cfg.get("tg_port", tgproxy.DEFAULT_PORT))
         try:
-            self.tgproxy.start(port=port)
+            actual = self.tgproxy.start(
+                port=port,
+                secret=self._tg_secret(),
+                dc_ips=self.cfg.get("tg_dc_ips") or None,
+                cfproxy=bool(self.cfg.get("tg_cfproxy", True)),
+                h2=bool(self.cfg.get("tg_h2", True)),
+                cf_domains=self.cfg.get("tg_cf_domains") or (),
+                fake_tls_domain=str(self.cfg.get("tg_faketls") or ""),
+                pool_size=int(self.cfg.get("tg_pool_size", 4)),
+            )
         except TgProxyError as e:
             return {**self.tg_get_state(), "ok": False, "error": str(e)}
         except Exception as e:  # noqa: BLE001
             _log(f"tg start: {e}")
             return {**self.tg_get_state(), "ok": False, "error": f"Не удалось запустить прокси: {e}"}
+        moved = actual != port
+        if moved:
+            # Порт был занят (например, у пользователя уже запущен отдельный tg-ws-proxy).
+            # Запоминаем фактический, иначе ссылка разойдётся с реальностью.
+            self.cfg["tg_port"] = actual
+            _log(f"tg: порт {port} занят, слушаю {actual}")
         self.cfg["tg_enabled"] = True
+        self.cfg["tg_core_version"] = tgproxy.core_version()
         config.save(self.cfg)
         self._push("onTgState", True)
-        return {**self.tg_get_state(), "ok": True,
-                "message": f"Прокси Telegram слушает {tgproxy.LOCAL_HOST}:{port}"}
+        message = f"Прокси Telegram слушает {tgproxy.LOCAL_HOST}:{actual}"
+        if moved:
+            message += " (прежний порт был занят — добавь прокси в Telegram заново)"
+        return {**self.tg_get_state(), "ok": True, "message": message}
 
     def tg_autoconfigure(self) -> dict:
-        """Открывает tg://socks-ссылку: Telegram спросит, добавить ли наш прокси
-        (это и есть «Настроить автоматически»). Прокси при этом должен быть включён."""
+        """«Настроить автоматически»: поднимает прокси (если выключен) и открывает
+        tg://-ссылку — Telegram сам предложит добавить прокси."""
         if not self.tgproxy.is_running():
             res = self.tg_set_enabled(True)
             if not res.get("ok"):
                 return res
-        port = int(self.cfg.get("tg_port", tgproxy.DEFAULT_PORT))
-        link = tgproxy.deeplink(port)
+        link = self.tgproxy.link() or self.tg_get_state()["link"]
         try:
-            os.startfile(link)  # noqa: S606  зарегистрированный обработчик tg:// = Telegram Desktop
+            os.startfile(link)  # noqa: S606  зарегистрированный обработчик tg:// = Telegram
         except Exception as e:  # noqa: BLE001
             _log(f"tg deeplink: {e}")
             return {**self.tg_get_state(), "ok": False,
-                    "error": "Не удалось открыть Telegram — задай прокси вручную: "
-                             f"Настройки → Продвинутые → Тип соединения → SOCKS5, "
-                             f"{tgproxy.LOCAL_HOST}:{port}"}
+                    "error": "Не удалось открыть Telegram — добавь прокси вручную по ссылке: "
+                             f"{link}"}
         return {**self.tg_get_state(), "ok": True,
                 "message": "Открыл Telegram — подтверди добавление прокси в приложении"}
 
-    def tg_diagnose(self) -> dict:
-        """Проверка обхода Telegram «по ступеням» — чтобы человек (и я по скриншоту)
-        видел, что именно сломалось: блокировка адресов, TLS или веб-сокет."""
+    def tg_set_options(self, port=None, cfproxy=None, h2=None, cf_domains=None,
+                       faketls=None) -> dict:
+        """Меняет настройки соединения Telegram. Если прокси уже работает —
+        перезапускаем его, чтобы изменения вступили в силу сразу."""
+        changed = False
+        if port is not None:
+            try:
+                new_port = int(port)
+            except (TypeError, ValueError):
+                new_port = 0
+            if 1 <= new_port <= 65535 and new_port != int(self.cfg.get("tg_port", 0)):
+                self.cfg["tg_port"] = new_port
+                changed = True
+        for key, value in (("tg_cfproxy", cfproxy), ("tg_h2", h2)):
+            if value is not None and bool(value) != bool(self.cfg.get(key)):
+                self.cfg[key] = bool(value)
+                changed = True
+        if cf_domains is not None:
+            domains = [str(d).strip().lower() for d in cf_domains if str(d).strip()]
+            if domains != list(self.cfg.get("tg_cf_domains") or []):
+                self.cfg["tg_cf_domains"] = domains
+                changed = True
+        if faketls is not None:
+            domain = str(faketls).strip().lower()
+            if domain != str(self.cfg.get("tg_faketls") or ""):
+                self.cfg["tg_faketls"] = domain
+                changed = True
+        config.save(self.cfg)
+        if changed and self.tgproxy.is_running():
+            self.tg_set_enabled(False)
+            res = self.tg_set_enabled(True)
+            if not res.get("ok"):
+                return res
+            return {**res, "message": (res.get("message", "") + " Настройки применены.").strip()}
+        return {**self.tg_get_state(), "ok": True, "message": "Настройки сохранены"}
+
+    def tg_check_core_update(self) -> dict:
+        """Ручная проверка: не вышло ли у ядра обхода Telegram новой версии."""
         try:
-            res = tgproxy.diagnose(endpoints=self.cfg.get("tg_endpoints") or None)
+            from . import tgws_update
+            info = tgws_update.check()
+        except Exception as e:  # noqa: BLE001
+            _log(f"tgws update check: {e}")
+            return {**self.tg_get_state(), "ok": False,
+                    "error": f"Не удалось проверить обновление ядра: {e}"}
+        self.cfg["tg_core_latest"] = info.get("latest", "")
+        self.cfg["tg_core_checked_at"] = time.time()
+        config.save(self.cfg)
+        if info.get("available"):
+            message = (f"У ядра вышла версия {info['latest']} (у нас {info['local']}). "
+                       "Она попадёт в следующем обновлении FreeConnect.")
+        elif info.get("error"):
+            message = f"Проверить не удалось: {info['error']}"
+        else:
+            message = f"Ядро обхода Telegram актуально ({info.get('local')})"
+        return {**self.tg_get_state(), "ok": True, "message": message}
+
+
+    def tg_diagnose(self) -> dict:
+        """Проверка соединения Telegram «по ступеням»: ядро, локальный прокси, прямой
+        канал до дата-центра, резерв через Cloudflare. Чтобы сбой было видно, а не
+        угадывать (сама логика — в tgproxy.diagnose)."""
+        try:
+            res = tgproxy.diagnose(
+                running=self.tgproxy.is_running(),
+                port=self.tgproxy.port(),
+                dc_ips=self.cfg.get("tg_dc_ips") or None,
+            )
         except Exception as e:  # noqa: BLE001
             _log(f"tg diagnose: {e}")
-            return {"ok": False, "verdict": f"Не удалось выполнить проверку: {e}",
-                    "rows": []}
-
-        rows = res.get("rows", [])
-        alive = [r["ip"] for r in rows if r.get("ok")]
-        if alive:
-            verdict = f"Соединение Telegram работает — живой адрес: {', '.join(alive)}"
-            hint = ""
-        elif not rows:
-            verdict = "Не с чем работать: нет ни одного адреса для проверки"
-            hint = "Похоже, не отвечает DNS. Проверь интернет."
-        elif all("нет ответа" in r.get("tcp", "") for r in rows):
-            verdict = "Провайдер блокирует все известные адреса Telegram"
-            hint = ("Нужен новый рабочий адрес — сообщи мне, обновлю список "
-                    "(или дождись автопоиска в следующей версии).")
-        else:
-            verdict = "До сервера доходим, но соединение не устанавливается"
-            hint = "Пришли эту таблицу — разберу по ступеням."
-        _log(f"tg diagnose: ok={res.get('ok')} живых={len(alive)} из {len(rows)}")
-        return {**res, "verdict": verdict, "hint": hint}
-
-    def tg_discover(self) -> dict:
-        """Ищет новый живой адрес веб-входа Telegram, если встроенный заблокировали.
-        Работает в фоне: перебор долгий, UI ждать не должен."""
-        if getattr(self, "_tg_discovering", False):
-            return {"ok": False, "error": "Поиск уже идёт"}
-        if not self.tgproxy.available():
-            return {"ok": False, "error": "Соединение Telegram недоступно"}
-        self._tg_discovering = True
-        threading.Thread(target=self._tg_discover_worker, daemon=True,
-                         name="tg-discover").start()
-        return {"ok": True, "started": True}
-
-    def _tg_discover_worker(self) -> None:
-        dc = tgproxy.DEFAULT_DC
-        try:
-            _log("tg discover: старт поиска живого адреса")
-            found = tgproxy.discover(
-                dc=dc, progress=lambda p: self._push("onTgDiscover", p))
-            if not found:
-                _log("tg discover: живых адресов не найдено")
-                self._push("onTgDiscoverDone",
-                           {"ok": False, "found": [],
-                            "message": "Живых адресов не нашлось — попробуй позже "
-                                       "или включи VPN и сообщи мне"})
-                return
-            # ДЦ2 и ДЦ4 обслуживает один узел, поэтому адрес годится обоим.
-            eps = dict(self.cfg.get("tg_endpoints") or {})
-            for key in (str(dc), "4") if dc == 2 else (str(dc),):
-                eps[key] = found
-            self.cfg["tg_endpoints"] = eps
-            config.save(self.cfg)
-            self.tgproxy.set_endpoints(eps)
-            _log(f"tg discover: найдено {found}, сохранено в конфиг")
-            if self.tgproxy.is_running():   # переподнять, чтобы новые адреса пошли в дело
-                self.tg_set_enabled(False)
-                self.tg_set_enabled(True)
-            self._push("onTgDiscoverDone",
-                       {"ok": True, "found": found,
-                        "message": f"Найден рабочий адрес: {', '.join(found)}"})
-        except Exception as e:  # noqa: BLE001
-            _log(f"tg discover err: {e}")
-            self._push("onTgDiscoverDone", {"ok": False, "found": [],
-                                            "message": f"Поиск не удался: {e}"})
-        finally:
-            self._tg_discovering = False
+            return {"ok": False, "rows": [],
+                    "verdict": f"Не удалось выполнить проверку: {e}", "hint": ""}
+        _log(f"tg diagnose: ok={res.get('ok')} — {res.get('verdict')}")
+        return res
 
     def enable(self) -> dict:
         if not self.strategy_name:

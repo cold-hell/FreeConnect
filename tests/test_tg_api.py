@@ -1,46 +1,65 @@
-"""Api-методы обхода Telegram: вкл/выкл прокси, персист в конфиг, автонастройка
-через tg://socks. Реальный прокси не поднимаем — подменяем движок фейком."""
+"""Api-методы соединения Telegram: состояние, вкл/выкл, автонастройка, настройки,
+проверка ядра. Реальный прокси не поднимаем — подменяем адаптер фейком."""
 import threading
 import unittest
+from unittest import mock
 
 from freeconnect import app as fcapp
-from freeconnect import tgproxy
+from freeconnect import tgproxy, tgws_update
 
 
 class _FakeTg:
-    """Заглушка движка Telegram-прокси: помнит вызовы, без реального сокета."""
-    def __init__(self, avail=True):
-        self._avail = avail
+    """Заглушка адаптера: помнит вызовы, отдаёт статус в формате настоящего."""
+
+    def __init__(self, available=True, move_to=None, fail_start=None):
+        self._available = available
         self._running = False
-        self.start_calls = 0
-        self.stop_calls = 0
-        self.started_port = None
+        self._port = None
+        self._move_to = move_to
+        self._fail = fail_start
+        self.starts: list[dict] = []
+        self.stops = 0
+        self.secret = ""
 
     def available(self):
-        return self._avail
+        return self._available
 
     def is_running(self):
         return self._running
 
-    def start(self, port=tgproxy.DEFAULT_PORT, lan=False):
-        if not self._avail:
-            raise fcapp.TgProxyError("нет зависимостей")
-        self.started_port = port
-        self.start_calls += 1
+    def port(self):
+        return self._port
+
+    def link(self):
+        if not self._running:
+            return ""
+        return tgproxy.deeplink(self._port, tgproxy.LOCAL_HOST, self.secret)
+
+    def status(self):
+        return {"available": self._available, "running": self._running,
+                "host": tgproxy.LOCAL_HOST, "port": self._port,
+                "secret": self.secret, "link": self.link(), "fake_tls": "",
+                "version": "1.11.2", "error": ""}
+
+    def start(self, **kwargs):
+        if self._fail:
+            raise tgproxy.TgProxyError(self._fail)
+        self.starts.append(kwargs)
+        self.secret = kwargs.get("secret", "")
+        self._port = self._move_to or kwargs.get("port")
         self._running = True
+        return self._port
 
     def stop(self):
-        self.stop_calls += 1
+        self.stops += 1
         self._running = False
-
-    def set_endpoints(self, endpoints):
-        self.endpoints = endpoints
+        self._port = None
 
 
-def _api(avail=True, cfg=None):
+def _api(cfg=None, tg=None):
     api = fcapp.Api.__new__(fcapp.Api)
     api.cfg = dict(cfg or {})
-    api.tgproxy = _FakeTg(avail)
+    api.tgproxy = tg or _FakeTg()
     api._events = []
     api._events_lock = threading.Lock()
     return api
@@ -48,172 +67,171 @@ def _api(avail=True, cfg=None):
 
 class TestTgApi(unittest.TestCase):
     def setUp(self):
+        self.saved: list[dict] = []
         self._orig_save = fcapp.config.save
-        fcapp.config.save = lambda c: None
+        fcapp.config.save = lambda cfg: self.saved.append(dict(cfg))
+        self.addCleanup(lambda: setattr(fcapp.config, "save", self._orig_save))
 
-    def tearDown(self):
-        fcapp.config.save = self._orig_save
+    # -- состояние ---------------------------------------------------------
 
-    def _diagnose_with(self, rows):
-        """Подменяет сетевую диагностику готовыми строками и возвращает вердикт."""
-        orig = fcapp.tgproxy.diagnose
-        fcapp.tgproxy.diagnose = lambda **_kw: {
-            "dc": 2, "host": "kws2.web.telegram.org", "dns": ["149.154.167.99"],
-            "rows": rows, "ok": any(r.get("ok") for r in rows)}
-        try:
-            return _api().tg_diagnose()
-        finally:
-            fcapp.tgproxy.diagnose = orig
-
-    def test_diagnose_reports_working_endpoint(self):
-        st = self._diagnose_with([
-            {"ip": "149.154.167.220", "tcp": "ok 45мс", "tls": "ok", "ws": "ok (101)", "ok": True},
-            {"ip": "149.154.167.99", "tcp": "нет ответа (блокировка)", "ok": False},
-        ])
-        self.assertTrue(st["ok"])
-        self.assertIn("работает", st["verdict"])
-        self.assertIn("149.154.167.220", st["verdict"])
-
-    def test_diagnose_reports_total_ip_block(self):
-        # Все адреса молчат на TCP — это ровно картина блокировки по IP.
-        st = self._diagnose_with([
-            {"ip": "149.154.167.220", "tcp": "нет ответа (блокировка)", "ok": False},
-            {"ip": "149.154.167.99", "tcp": "нет ответа (блокировка)", "ok": False},
-        ])
-        self.assertFalse(st["ok"])
-        self.assertIn("блокирует", st["verdict"])
-        self.assertTrue(st["hint"])          # подсказка, что делать дальше
-
-    def test_diagnose_reports_partial_failure(self):
-        # Доходим до сервера, но канал не встаёт — не спутать с блокировкой.
-        st = self._diagnose_with([
-            {"ip": "149.154.167.220", "tcp": "ok 45мс", "tls": "ok",
-             "ws": "сбой (TimeoutError)", "ok": False},
-        ])
-        self.assertFalse(st["ok"])
-        self.assertIn("доходим", st["verdict"].lower())
-
-    def test_diagnose_survives_engine_error(self):
-        orig = fcapp.tgproxy.diagnose
-
-        def boom(**_kw):
-            raise OSError("сеть недоступна")
-
-        fcapp.tgproxy.diagnose = boom
-        try:
-            st = _api().tg_diagnose()
-        finally:
-            fcapp.tgproxy.diagnose = orig
-        self.assertFalse(st["ok"])
-        self.assertEqual(st["rows"], [])
-
-    def _run_discover(self, found):
-        """Прогоняет фонового воркера поиска синхронно, подменив сам перебор."""
-        saved = {}
-        orig_disc, orig_save = fcapp.tgproxy.discover, fcapp.config.save
-        fcapp.tgproxy.discover = lambda **_kw: list(found)
-        fcapp.config.save = lambda c: saved.update(c)
+    def test_state_when_off(self):
         api = _api()
-        api._tg_discovering = True
-        try:
-            api._tg_discover_worker()
-        finally:
-            fcapp.tgproxy.discover, fcapp.config.save = orig_disc, orig_save
-        events = [e["fn"] for e in api._events]
-        done = [e["args"][0] for e in api._events if e["fn"] == "onTgDiscoverDone"]
-        return api, saved, events, done[0] if done else None
+        state = api.tg_get_state()
+        self.assertFalse(state["enabled"])
+        self.assertEqual(state["port"], tgproxy.DEFAULT_PORT)
+        self.assertTrue(state["link"].startswith("tg://proxy?"))
+        self.assertIn("secret=dd", state["link"])
+        self.assertEqual(state["version"], "1.11.2")
 
-    def test_discover_saves_found_endpoint_for_dc2_and_dc4(self):
-        api, saved, _events, done = self._run_discover(["149.154.167.221"])
-        # Один узел обслуживает ДЦ2 и ДЦ4 — адрес прописываем обоим.
-        self.assertEqual(api.cfg["tg_endpoints"]["2"], ["149.154.167.221"])
-        self.assertEqual(api.cfg["tg_endpoints"]["4"], ["149.154.167.221"])
-        self.assertEqual(saved.get("tg_endpoints"), api.cfg["tg_endpoints"])
-        self.assertEqual(api.tgproxy.endpoints, api.cfg["tg_endpoints"])
-        self.assertTrue(done["ok"])
-        self.assertFalse(api._tg_discovering)      # флаг снят -> можно искать снова
-
-    def test_discover_reports_failure_without_touching_config(self):
-        api, saved, _events, done = self._run_discover([])
-        self.assertNotIn("tg_endpoints", api.cfg)   # ничего не портим
-        self.assertEqual(saved, {})
-        self.assertFalse(done["ok"])
-        self.assertFalse(api._tg_discovering)
-
-    def test_discover_refuses_second_run_while_busy(self):
+    def test_secret_is_generated_once_and_persisted(self):
         api = _api()
-        api._tg_discovering = True
-        st = api.tg_discover()
-        self.assertFalse(st["ok"])
-        self.assertIn("идёт", st["error"])
+        api.tg_get_state()
+        secret = api.cfg["tg_secret"]
+        self.assertEqual(len(secret), 32)
+        int(secret, 16)                       # секрет — валидный hex
+        api.tg_get_state()                    # второй раз не перегенерируем
+        self.assertEqual(api.cfg["tg_secret"], secret)
 
-    def test_state_defaults(self):
-        st = _api().tg_get_state()
-        self.assertTrue(st["available"])
-        self.assertFalse(st["enabled"])
-        self.assertEqual(st["port"], tgproxy.DEFAULT_PORT)
-        self.assertIn("127.0.0.1", st["deeplink"])
-        self.assertIn(f"port={tgproxy.DEFAULT_PORT}", st["deeplink"])
+    def test_existing_secret_is_reused(self):
+        api = _api(cfg={"tg_secret": "a" * 32})
+        api.tg_get_state()
+        self.assertEqual(api.cfg["tg_secret"], "a" * 32)
 
-    def test_enable_starts_and_persists(self):
-        api = _api()
-        st = api.tg_set_enabled(True)
-        self.assertTrue(st["ok"])
-        self.assertTrue(st["enabled"])
-        self.assertEqual(api.tgproxy.start_calls, 1)
-        self.assertEqual(api.tgproxy.started_port, tgproxy.DEFAULT_PORT)
+    # -- включение / выключение -------------------------------------------
+
+    def test_enable_passes_settings_from_config(self):
+        api = _api(cfg={"tg_port": 1500, "tg_secret": "b" * 32,
+                        "tg_dc_ips": {"2": "1.1.1.1"}, "tg_cfproxy": False,
+                        "tg_h2": False, "tg_cf_domains": ["relay.example"],
+                        "tg_faketls": "mask.example", "tg_pool_size": 2})
+        result = api.tg_set_enabled(True)
+        self.assertTrue(result["ok"])
+        kwargs = api.tgproxy.starts[0]
+        self.assertEqual(kwargs["port"], 1500)
+        self.assertEqual(kwargs["dc_ips"], {"2": "1.1.1.1"})
+        self.assertFalse(kwargs["cfproxy"])
+        self.assertFalse(kwargs["h2"])
+        self.assertEqual(kwargs["cf_domains"], ["relay.example"])
+        self.assertEqual(kwargs["fake_tls_domain"], "mask.example")
+        self.assertEqual(kwargs["pool_size"], 2)
         self.assertTrue(api.cfg["tg_enabled"])
+        self.assertEqual(api.cfg["tg_core_version"], "1.11.2")
 
-    def test_enable_uses_custom_port(self):
-        api = _api(cfg={"tg_port": 1090})
-        st = api.tg_set_enabled(True)
-        self.assertEqual(api.tgproxy.started_port, 1090)
-        self.assertIn("port=1090", st["deeplink"])
+    def test_enable_remembers_actual_port_when_preferred_was_busy(self):
+        api = _api(cfg={"tg_port": 1443}, tg=_FakeTg(move_to=50555))
+        result = api.tg_set_enabled(True)
+        self.assertTrue(result["ok"])
+        self.assertEqual(api.cfg["tg_port"], 50555)
+        self.assertIn("50555", result["message"])
+        self.assertIn("занят", result["message"])
 
-    def test_disable_stops_and_persists(self):
-        api = _api()
-        api.tg_set_enabled(True)
-        st = api.tg_set_enabled(False)
-        self.assertTrue(st["ok"])
-        self.assertFalse(st["enabled"])
-        self.assertEqual(api.tgproxy.stop_calls, 1)
-        self.assertFalse(api.cfg["tg_enabled"])
-
-    def test_enable_without_deps_errors(self):
-        api = _api(avail=False)
-        st = api.tg_set_enabled(True)
-        self.assertFalse(st["ok"])
-        self.assertIn("error", st)
+    def test_enable_reports_core_error(self):
+        api = _api(tg=_FakeTg(fail_start="порт занят"))
+        result = api.tg_set_enabled(True)
+        self.assertFalse(result["ok"])
+        self.assertIn("порт занят", result["error"])
         self.assertFalse(api.cfg.get("tg_enabled"))
 
-    def test_autoconfigure_opens_deeplink_and_starts(self):
+    def test_disable_stops_proxy(self):
+        api = _api(cfg={"tg_secret": "c" * 32})
+        api.tg_set_enabled(True)
+        result = api.tg_set_enabled(False)
+        self.assertTrue(result["ok"])
+        self.assertEqual(api.tgproxy.stops, 1)
+        self.assertFalse(api.cfg["tg_enabled"])
+
+    # -- автонастройка -----------------------------------------------------
+
+    def test_autoconfigure_starts_and_opens_link(self):
+        api = _api(cfg={"tg_secret": "d" * 32})
+        with mock.patch.object(fcapp.os, "startfile") as startfile:
+            result = api.tg_autoconfigure()
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(api.tgproxy.starts), 1)          # прокси подняли
+        opened = startfile.call_args[0][0]
+        self.assertTrue(opened.startswith("tg://proxy?"))
+        self.assertIn("secret=dd", opened)
+
+    def test_autoconfigure_reports_failure_with_link(self):
+        api = _api(cfg={"tg_secret": "e" * 32})
+        with mock.patch.object(fcapp.os, "startfile",
+                               side_effect=OSError("нет обработчика")):
+            result = api.tg_autoconfigure()
+        self.assertFalse(result["ok"])
+        self.assertIn("tg://proxy?", result["error"])
+
+    # -- настройки ---------------------------------------------------------
+
+    def test_options_apply_and_restart_when_running(self):
+        api = _api(cfg={"tg_secret": "f" * 32, "tg_port": 1443,
+                        "tg_cfproxy": True, "tg_h2": True})
+        api.tg_set_enabled(True)
+        result = api.tg_set_options(port=1500, cfproxy=False, h2=False,
+                                    cf_domains=["Relay.Example"],
+                                    faketls="Mask.Example")
+        self.assertTrue(result["ok"])
+        self.assertEqual(api.cfg["tg_port"], 1500)
+        self.assertFalse(api.cfg["tg_cfproxy"])
+        self.assertEqual(api.cfg["tg_cf_domains"], ["relay.example"])
+        self.assertEqual(api.cfg["tg_faketls"], "mask.example")
+        self.assertEqual(api.tgproxy.stops, 1)                # перезапуск был
+        self.assertEqual(len(api.tgproxy.starts), 2)
+
+    def test_options_without_changes_do_not_restart(self):
+        api = _api(cfg={"tg_secret": "1" * 32, "tg_port": 1443})
+        api.tg_set_enabled(True)
+        result = api.tg_set_options(port=1443)
+        self.assertTrue(result["ok"])
+        self.assertEqual(api.tgproxy.stops, 0)
+
+    def test_options_ignore_invalid_port(self):
+        api = _api(cfg={"tg_port": 1443})
+        api.tg_set_options(port="не число")
+        self.assertEqual(api.cfg["tg_port"], 1443)
+        api.tg_set_options(port=0)
+        self.assertEqual(api.cfg["tg_port"], 1443)
+
+    # -- диагностика и ядро ------------------------------------------------
+
+    def test_diagnose_passes_rows_through(self):
+        api = _api(cfg={"tg_secret": "2" * 32})
+        payload = {"ok": True,
+                   "rows": [{"step": "Ядро обхода", "ok": True, "detail": "1.11.2"}],
+                   "verdict": "Соединение Telegram работает", "hint": ""}
+        with mock.patch.object(fcapp.tgproxy, "diagnose", return_value=payload) as diag:
+            result = api.tg_diagnose()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["verdict"], payload["verdict"])
+        self.assertIs(diag.call_args.kwargs["running"], False)
+
+    def test_diagnose_survives_exception(self):
         api = _api()
-        opened = []
-        orig = fcapp.os.startfile
-        fcapp.os.startfile = lambda link: opened.append(link)
-        try:
-            st = api.tg_autoconfigure()
-        finally:
-            fcapp.os.startfile = orig
-        self.assertTrue(st["ok"])
-        self.assertTrue(api.tgproxy.is_running())        # автонастройка сама поднимает прокси
-        self.assertEqual(len(opened), 1)
-        self.assertTrue(opened[0].startswith("tg://socks"))
+        with mock.patch.object(fcapp.tgproxy, "diagnose",
+                               side_effect=RuntimeError("бум")):
+            result = api.tg_diagnose()
+        self.assertFalse(result["ok"])
+        self.assertIn("бум", result["verdict"])
 
-    def test_autoconfigure_reports_manual_fallback_on_failure(self):
+    def test_check_core_update_reports_newer_version(self):
         api = _api()
-        orig = fcapp.os.startfile
+        with mock.patch.object(tgws_update, "check",
+                               return_value={"local": "1.11.2", "latest": "1.12.0",
+                                             "tag": "v1.12.0", "url": "",
+                                             "available": True, "error": ""}):
+            result = api.tg_check_core_update()
+        self.assertTrue(result["ok"])
+        self.assertIn("1.12.0", result["message"])
+        self.assertEqual(api.cfg["tg_core_latest"], "1.12.0")
 
-        def boom(_link):
-            raise OSError("no handler")
-
-        fcapp.os.startfile = boom
-        try:
-            st = api.tg_autoconfigure()
-        finally:
-            fcapp.os.startfile = orig
-        self.assertFalse(st["ok"])
-        self.assertIn("SOCKS5", st["error"])             # подсказка на ручную настройку
+    def test_check_core_update_reports_failure(self):
+        api = _api()
+        with mock.patch.object(tgws_update, "check",
+                               return_value={"local": "1.11.2", "latest": "", "tag": "",
+                                             "url": "", "available": False,
+                                             "error": "URLError: нет сети"}):
+            result = api.tg_check_core_update()
+        self.assertTrue(result["ok"])
+        self.assertIn("нет сети", result["message"])
 
 
 if __name__ == "__main__":
