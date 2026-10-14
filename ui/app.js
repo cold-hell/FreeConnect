@@ -59,21 +59,31 @@ const MockApi = {
   async sites_get(){ return {text:this._sites, count:this._sites.split(/[\s,]+/).filter(x=>x.trim()).length}; },
   async sites_set(text){ this._sites=(text||"").trim(); const c=this._sites.split(/[\s,]+/).filter(x=>x.trim()).length;
     return {ok:true, text:this._sites, count:c, message:"Сохранено сайтов: "+c+" (мок)"}; },
-  // Обход Telegram (мок для отладки дизайна в браузере).
-  _tg:{enabled:false},
-  async tg_get_state(){ return {available:true, enabled:this._tg.enabled, port:1080, host:"127.0.0.1", deeplink:"tg://socks?server=127.0.0.1&port=1080", autostart:false}; },
+  // Соединение Telegram (мок для отладки дизайна в браузере — реальная логика в бэкенде).
+  _tg:{enabled:false, port:1443, cfproxy:true, h2:true, domains:[]},
+  async tg_get_state(){ return {available:true, enabled:this._tg.enabled, port:this._tg.port, host:"127.0.0.1",
+    link:"tg://proxy?server=127.0.0.1&port="+this._tg.port+"&secret=dd0123456789abcdef0123456789abcdef",
+    deeplink:"tg://proxy?server=127.0.0.1&port="+this._tg.port+"&secret=dd0123456789abcdef0123456789abcdef",
+    version:"1.11.2", core_latest:"", cfproxy:this._tg.cfproxy, h2:this._tg.h2,
+    cf_domains:this._tg.domains, faketls:"", autostart:false, error:""}; },
   async tg_set_enabled(on){ this._tg.enabled=!!on; if(window.onTgState) window.onTgState(!!on);
-    return {...await this.tg_get_state(), ok:true, message: on?"Прокси Telegram включён (мок)":"Обход Telegram выключен"}; },
+    return {...await this.tg_get_state(), ok:true,
+            message: on?("Прокси Telegram слушает 127.0.0.1:"+this._tg.port+" (мок)"):"Соединение Telegram выключено"}; },
   async tg_autoconfigure(){ this._tg.enabled=true; if(window.onTgState) window.onTgState(true);
     return {...await this.tg_get_state(), ok:true, message:"Открыл Telegram (мок)"}; },
-  async tg_discover(){ setTimeout(()=>{ if(window.onTgDiscover) window.onTgDiscover({stage:"scan",done:128,total:256});
-    setTimeout(()=>{ if(window.onTgDiscoverDone) window.onTgDiscoverDone({ok:true,found:["149.154.167.220"],
-      message:"Найден рабочий адрес: 149.154.167.220 (мок)"}); }, 600); }, 300);
-    return {ok:true, started:true}; },
-  async tg_diagnose(){ return {ok:true, verdict:"Обход Telegram работает — живой адрес: 149.154.167.220 (мок)",
-    hint:"", host:"kws2.web.telegram.org", dns:["149.154.167.99"], rows:[
-      {ip:"149.154.167.220", source:"встроенный", tcp:"ok 45мс", tls:"ok", ws:"ok (101)", ok:true},
-      {ip:"149.154.167.99", source:"DNS", tcp:"нет ответа (блокировка)", tls:"—", ws:"—", ok:false}]}; },
+  async tg_set_options(o={}){
+    if(o.port!==undefined) this._tg.port=o.port;
+    if(o.cfproxy!==undefined) this._tg.cfproxy=!!o.cfproxy;
+    if(o.h2!==undefined) this._tg.h2=!!o.h2;
+    if(o.cf_domains!==undefined) this._tg.domains=o.cf_domains||[];
+    return {...await this.tg_get_state(), ok:true, message:"Настройки сохранены (мок)"}; },
+  async tg_check_core_update(){ return {...await this.tg_get_state(), ok:true,
+    message:"Ядро обхода Telegram актуально (мок)"}; },
+  async tg_diagnose(){ return {ok:true, verdict:"Соединение Telegram работает (мок)", hint:"",
+    rows:[{step:"Ядро обхода", ok:true, detail:"tg-ws-proxy 1.11.2"},
+          {step:"Локальный прокси", ok:true, detail:"127.0.0.1:"+this._tg.port},
+          {step:"Прямой канал до Telegram", ok:true, detail:"149.154.167.220: канал открыт"},
+          {step:"Резерв через Cloudflare", ok:false, detail:"ни один из 20 доменов не разрешается"}]}; },
   async vpn_set_enabled(on){
     this._vpn.enabled=!!on;
     if(window.onVpnState) window.onVpnState(!!on);
@@ -757,7 +767,7 @@ function vpnSetBadge(on){
 }
 window.onVpnState=(on)=>vpnSetBadge(!!on);
 
-// ---------- Обход Telegram (локальный SOCKS5→WebSocket, см. tgproxy.py) ----------
+// ---------- Соединение Telegram (локальный MTProto-прокси, см. tgproxy.py) ----------
 $("#openTg").onclick=async()=>{ $("#settingsModal").classList.remove("show"); $("#tgModal").classList.add("show"); await tgRefresh(); };
 $("#closeTg").onclick=()=>$("#tgModal").classList.remove("show");
 
@@ -788,14 +798,27 @@ $("#sitesSave").onclick=async()=>{
   finally{ btn.disabled=false; btn.textContent=old; }
 };
 
+let tgState=null;
 function tgSetStatus(text, on){
   $("#tgStatusText").textContent=text;
   $("#tgStatus").classList.toggle("on", !!on);
 }
 function tgApplyState(st){
   if(!st) return;
+  tgState=st;
   $("#optTgOn").checked=!!st.enabled;
-  if(st.host && st.port) $("#tgManualAddr").textContent=st.host+":"+st.port;
+  // Показываем полную ссылку: по ней прокси добавляется в Telegram вручную.
+  const link=st.link||st.deeplink||"";
+  if(link) $("#tgManualAddr").textContent=link;
+  const ver=$("#tgCoreVersion");
+  if(ver) ver.textContent=(st.version||"—")+
+    (st.core_latest && st.core_latest!==st.version?` (у ядра ${st.core_latest})`:"");
+  if($("#tgCfproxy")) $("#tgCfproxy").checked=!!st.cfproxy;
+  if($("#tgH2")) $("#tgH2").checked=!!st.h2;
+  // Поле домена не перетираем, пока пользователь в нём печатает.
+  const domainsEl=$("#tgCfDomains");
+  if(domainsEl && document.activeElement!==domainsEl)
+    domainsEl.value=(st.cf_domains||[]).join(", ");
   if(st.enabled) tgSetStatus("Включён — Telegram идёт через прокси", true);
   else tgSetStatus(st.available===false?"Недоступно (обнови приложение)":"Выключен", false);
   // Без автозапуска Telegram умрёт после перезагрузки — предупреждаем заранее.
@@ -828,7 +851,22 @@ $("#tgAutoBtn").onclick=async()=>{
   }catch(e){ toast("Ошибка автонастройки","warn"); }
   finally{ btn.disabled=false; btn.textContent=old; }
 };
-// Диагностика: показывает, на какой ступени рвётся (блокировка IP / TLS / веб-сокет).
+// Копирование ссылки: пригодится, если Telegram не подхватил tg:// автоматически.
+$("#tgCopyBtn").onclick=async()=>{
+  const link=(tgState&&(tgState.link||tgState.deeplink))||$("#tgManualAddr").textContent||"";
+  if(!link || link==="—"){ toast("Ссылка ещё не готова","warn"); return; }
+  try{
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      await navigator.clipboard.writeText(link);
+    }else{
+      const ta=document.createElement("textarea");
+      ta.value=link; document.body.appendChild(ta); ta.select();
+      document.execCommand("copy"); document.body.removeChild(ta);
+    }
+    toast("Ссылка скопирована — вставь её в Telegram","ok");
+  }catch(e){ toast("Не удалось скопировать — выдели ссылку вручную","warn"); }
+};
+// Диагностика по ступеням: ядро, локальный прокси, прямой канал, резерв Cloudflare.
 $("#tgCheckBtn").onclick=async()=>{
   const btn=$("#tgCheckBtn"), old=btn.textContent;
   btn.disabled=true; btn.textContent="Проверяю…";
@@ -840,45 +878,38 @@ $("#tgCheckBtn").onclick=async()=>{
     // Подсказка есть не всегда; пустой .settings-note рисовался бы пустой жёлтой рамкой.
     const hint=$("#tgDiagHint");
     hint.textContent=r.hint||""; hint.hidden=!r.hint;
-    // Все адреса молчат = их заблокировали: предлагаем поискать новый.
-    $("#tgFindBtn").hidden = !!r.ok;
     $("#tgDiagRows").innerHTML=(r.rows||[]).map(row=>
       `<div class="tg-diag-row ${row.ok?"ok":"bad"}">`+
-      `<b>${row.ip}</b> <span class="tg-diag-src">${row.source||""}</span>`+
-      `<span>связь: ${row.tcp}</span><span>шифрование: ${row.tls}</span>`+
-      `<span>канал: ${row.ws}</span></div>`).join("");
+      `<b>${row.step||""}</b><span>${row.detail||""}</span></div>`).join("");
   }catch(e){ toast("Не удалось выполнить проверку","warn"); }
   finally{ btn.disabled=false; btn.textContent=old; }
 };
-// Автопоиск живого адреса — на случай, если встроенный однажды заблокируют.
-$("#tgFindBtn").onclick=async()=>{
-  const btn=$("#tgFindBtn");
-  btn.disabled=true; btn.textContent="Ищу…";
-  const p=$("#tgFindProgress"); p.hidden=false;
-  p.textContent="Готовлюсь к поиску…";
+// Проверка, не вышло ли у ядра обхода Telegram новой версии.
+$("#tgCoreBtn").onclick=async()=>{
+  const btn=$("#tgCoreBtn"), old=btn.textContent;
+  btn.disabled=true; btn.textContent="Проверяю…";
   try{
-    const r=await api().tg_discover();
-    if(r && r.ok===false){ toast(r.error||"Не удалось запустить поиск","warn"); tgFindReset(); }
-  }catch(e){ toast("Не удалось запустить поиск","warn"); tgFindReset(); }
+    const r=await api().tg_check_core_update();
+    if(r && r.ok===false){ toast(r.error||"Не удалось проверить","warn"); }
+    else if(r){ toast(r.message||"Готово","ok"); }
+    tgApplyState(r);
+  }catch(e){ toast("Не удалось проверить обновление ядра","warn"); }
+  finally{ btn.disabled=false; btn.textContent=old; }
 };
-function tgFindReset(){
-  const btn=$("#tgFindBtn");
-  btn.disabled=false; btn.textContent="Найти рабочий адрес";
-}
-window.onTgDiscover=(p)=>{
-  const el=$("#tgFindProgress");
-  if(!el||!p) return;
-  el.hidden=false;
-  el.textContent = p.stage==="verify"
-    ? `Проверяю найденные узлы: ${p.done} из ${p.total}…`
-    : `Перебираю адреса: ${p.done} из ${p.total}…`;
-};
-window.onTgDiscoverDone=(r)=>{
-  tgFindReset();
-  const el=$("#tgFindProgress");
-  if(el){ el.hidden=false; el.textContent=(r&&r.message)||""; }
-  if(r&&r.ok){ toast(r.message||"Найден рабочий адрес","ok"); $("#tgFindBtn").hidden=true; }
-  else if(r){ toast(r.message||"Живых адресов не нашлось","warn"); }
+// Настройки соединения: резерв, HTTP/2 и свой домен — применяются сразу.
+$("#tgCfApply").onclick=async()=>{
+  const btn=$("#tgCfApply"), old=btn.textContent;
+  btn.disabled=true; btn.textContent="Применяю…";
+  const domains=($("#tgCfDomains").value||"").split(/[\s,]+/).filter(x=>x.trim());
+  try{
+    const st=await api().tg_set_options({cfproxy:$("#tgCfproxy").checked,
+                                         h2:$("#tgH2").checked,
+                                         cf_domains:domains});
+    if(st && st.ok===false){ toast(st.error||"Не удалось применить","warn"); }
+    else if(st){ toast(st.message||"Настройки применены","ok"); }
+    tgApplyState(st);
+  }catch(e){ toast("Не удалось применить настройки","warn"); }
+  finally{ btn.disabled=false; btn.textContent=old; }
 };
 $("#optTgOn").onchange=async(e)=>{
   const want=e.target.checked;

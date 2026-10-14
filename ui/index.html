@@ -275,7 +275,7 @@
 
       <!-- Продвинутое: вход в отдельное окно соединения Telegram -->
       <button class="settings-entry" id="openTg">
-        <span class="se-main">Соединение Telegram<small class="toggle-sub">стабильная связь без VPN — локальный прокси через веб-канал Telegram</small></span>
+        <span class="se-main">Соединение Telegram<small class="toggle-sub">стабильная связь без VPN — локальный прокси через веб-канал Telegram, с резервом Cloudflare</small></span>
         <span class="se-arrow">›</span>
       </button>
 
@@ -341,9 +341,26 @@
       <div class="vpn-status" id="tgStatus"><span class="vpn-dot"></span><span id="tgStatusText">Выключен</span></div>
 
       <div class="vpn-section">
-        <div class="settings-note">Направляет Telegram через его собственный веб-канал (web.telegram.org) — без VPN и подписок. Нажми «Настроить автоматически», и Telegram сам предложит добавить прокси.</div>
+        <div class="settings-note">Направляет Telegram через его собственный веб-канал (web.telegram.org) — без VPN и подписок. Если прямой адрес придушат, трафик уйдёт через резервный канал Cloudflare. Нажми «Настроить автоматически», и Telegram сам предложит добавить прокси.</div>
         <button class="btn primary" id="tgAutoBtn" style="width:100%;margin-top:10px">Настроить автоматически</button>
-        <div class="settings-note" id="tgManual" style="margin-top:8px">Вручную: Telegram → Настройки → Продвинутые → Тип соединения → SOCKS5, <b id="tgManualAddr">127.0.0.1:1080</b></div>
+        <button class="btn" id="tgCopyBtn" style="width:100%;margin-top:8px">Скопировать ссылку для Telegram</button>
+        <div class="settings-note" id="tgManual" style="margin-top:8px">Вручную: Telegram → Настройки → Продвинутые → Тип соединения → <b>Прокси</b> → добавить прокси и вставить ссылку:<br>
+          <b id="tgManualAddr" style="word-break:break-all">—</b></div>
+      </div>
+
+      <div class="vpn-section">
+        <label class="toggle-row">
+          <span>Резерв через Cloudflare<small class="toggle-sub">когда прямой адрес Telegram недоступен — идём через резервный канал</small></span>
+          <span class="switch"><input type="checkbox" id="tgCfproxy"><span class="slider"></span></span>
+        </label>
+        <label class="toggle-row">
+          <span>Мультиплексирование медиа (HTTP/2)<small class="toggle-sub">фото и видео через резервный канал</small></span>
+          <span class="switch"><input type="checkbox" id="tgH2"><span class="slider"></span></span>
+        </label>
+        <div class="settings-note" style="margin-top:8px">Свой домен для резерва (необязательно; пусто — общий пул ядра):
+          <input class="vpn-input" id="tgCfDomains" placeholder="kws.example.com" autocomplete="off" spellcheck="false" style="margin-top:6px">
+        </div>
+        <button class="btn small" id="tgCfApply" style="width:100%;margin-top:8px">Применить настройки</button>
       </div>
 
       <div class="tg-warn" id="tgAutostartWarn" hidden>
@@ -359,8 +376,8 @@
           <div class="tg-diag-rows" id="tgDiagRows"></div>
           <div class="settings-note" id="tgDiagHint"></div>
         </div>
-        <button class="btn" id="tgFindBtn" style="width:100%;margin-top:8px" hidden>Найти рабочий адрес</button>
-        <div class="settings-note" id="tgFindProgress" hidden></div>
+        <button class="btn" id="tgCoreBtn" style="width:100%;margin-top:8px">Проверить обновление ядра</button>
+        <div class="settings-note" id="tgCoreNote">Ядро обхода Telegram: <b id="tgCoreVersion">—</b></div>
       </div>
 
       <label class="toggle-row vpn-main-toggle">

@@ -17,6 +17,10 @@ hiddenimports = []
 hiddenimports += collect_submodules('webview')   # backend winforms/edgechromium
 hiddenimports += ['pystray._win32', 'PIL._tkinter_finder', 'clr']
 hiddenimports += ['freeconnect.voicewatch']   # импортируется лениво из app.py
+# Ядро обхода Telegram (freeconnect/tgws) тоже импортируется лениво — внутри функций
+# tgproxy.py, — поэтому статический анализ PyInstaller его не видит. Перечисляем явно.
+hiddenimports += collect_submodules('freeconnect.tgws')
+hiddenimports += ['freeconnect.tgws_update', 'httpx', 'h2', 'certifi']
 
 a = Analysis(
     ['freeconnect_main.py'],

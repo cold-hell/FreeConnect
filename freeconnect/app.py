@@ -768,7 +768,7 @@ class Api:
             self._stop_doh()   # синхронно: вернуть DNS адаптера ДО выхода
             self.engine.stop()
             self.singbox.stop()  # снять TUN и маршруты VPN, не осиротить туннель
-            self.tgproxy.stop()  # закрыть локальный SOCKS5 Telegram
+            self.tgproxy.stop()  # закрыть локальный прокси Telegram
         except Exception:
             pass
         if self.tray:
