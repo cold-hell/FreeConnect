@@ -90,9 +90,11 @@ def port_is_free(port: int, host: str = LOCAL_HOST) -> bool:
 
 def pick_port(preferred: int, host: str = LOCAL_HOST) -> int:
     """Предпочитаем заданный порт, но если он занят (например, у пользователя уже
-    запущен отдельный TgWsProxy) — берём любой свободный, чтобы не падать."""
-    if port_is_free(preferred, host):
-        return int(preferred)
+    запущен отдельный TgWsProxy) — берём любой свободный, чтобы не падать.
+    Значение <= 0 означает «выбери любой свободный»."""
+    preferred = int(preferred)
+    if preferred > 0 and port_is_free(preferred, host):
+        return preferred
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind((host, 0))
         return int(sock.getsockname()[1])

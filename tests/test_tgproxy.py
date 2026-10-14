@@ -94,6 +94,15 @@ class TestPorts(unittest.TestCase):
         self.assertNotEqual(chosen, taken)
         self.assertTrue(tgproxy.port_is_free(chosen))
 
+    def test_zero_means_any_free_port(self):
+        """0 — «выбери любой свободный»: так стартует интеграционный тест."""
+        chosen = tgproxy.pick_port(0)
+        self.assertGreater(chosen, 0)
+        self.assertTrue(tgproxy.port_is_free(chosen))
+
+    def test_negative_port_means_any_free_port(self):
+        self.assertGreater(tgproxy.pick_port(-1), 0)
+
 
 class TestVendoredCore(unittest.TestCase):
     def test_core_is_present_and_versioned(self):
