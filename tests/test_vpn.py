@@ -396,6 +396,133 @@ class TestTunnelWorks(unittest.TestCase):
             vpn._socks_connect_ip = orig
 
 
+# ---- Share-ссылки: самый ходовой формат подписки (панель отдаёт base64 от строк) ----
+# Раньше такие подписки не разбирались ВООБЩЕ (0 серверов): «в Happ серверы есть,
+# а в FreeConnect нет» — ровно этот случай.
+
+REALITY_LINK = (
+    "vless://71c8bb98-ab9b-4bec-83bb-e32cf870b9d5@188.253.22.204:443"
+    "?encryption=none&flow=xtls-rprx-vision&type=tcp&security=reality"
+    "&sni=tg.capynode.com&fp=qq&pbk=sMjQ93A1pjYo-vG91WS4N7TkPgfzI9kpqxkf5YVRW0I&sid=a353848a193ec557&spx=%2F"
+    "#%F0%9F%87%B1%F0%9F%87%BB%20%D0%9B%D0%B0%D1%82%D0%B2%D0%B8%D1%8F"          # 🇱🇻 Латвия
+)
+WS_TLS_LINK = (
+    "vless://11111111-2222-3333-4444-555555555555@nl1.example.com:8443"
+    "?encryption=none&security=tls&sni=nl1.example.com&type=ws&host=nl1.example.com"
+    "&path=%2Fws#%D0%9D%D0%B8%D0%B4%D0%B5%D1%80%D0%BB%D0%B0%D0%BD%D0%B4%D1%8B%20%2B"
+)
+TROJAN_GRPC_LINK = (
+    "trojan://secretpass@tr.example.net:2053"
+    "?security=reality&sni=yahoo.com&fp=chrome&pbk=sMjQ93A1pjYo-vG91WS4N7TkPgfzI9kpqxkf5YVRW0I&sid=ab12"
+    "&type=grpc&serviceName=grpcsvc#%D0%93%D0%B5%D1%80%D0%BC%D0%B0%D0%BD%D0%B8%D1%8F%20%E2%9A%A1"
+)
+HY2_LINK = ("hysteria2://mypass@fi.example.org:8447"
+            "?sni=fi.example.org&insecure=1&alpn=h3&obfs=salamander&obfs-password=op"
+            "#%D0%A4%D0%B8%D0%BD%D0%BB%D1%8F%D0%BD%D0%B4%D0%B8%D1%8F")
+SS_LINK = ("ss://" + base64.b64encode(b"aes-256-gcm:sspass").decode()
+           + "@sg.example.com:8388#%D0%A1%D0%B8%D0%BD%D0%B3%D0%B0%D0%BF%D1%83%D1%80")
+
+
+def _vmess_link() -> str:
+    payload = {"v": "2", "ps": "Япония", "add": "jp.example.com", "port": "443",
+               "id": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "aid": "0", "scy": "auto",
+               "net": "ws", "type": "none", "host": "jp.example.com", "path": "/vm",
+               "tls": "tls", "sni": "jp.example.com"}
+    return "vmess://" + base64.b64encode(json.dumps(payload).encode()).decode()
+
+
+RU_LINK = ("vless://x@ru-relay.example.ru:443?security=reality&sni=a.com&pbk=K&type=tcp"
+           "#%D0%A0%D0%BE%D1%81%D1%81%D0%B8%D1%8F")
+
+
+class TestShareLinks(unittest.TestCase):
+    def _one(self, link: str):
+        srvs = vpn.parse_servers(link)
+        self.assertEqual(len(srvs), 1, f"ожидали ровно один сервер из {link[:40]}…")
+        return srvs[0]
+
+    def test_vless_reality_link(self):
+        s = self._one(REALITY_LINK)
+        self.assertEqual((s.kind, s.address, s.port), ("vless-reality", "188.253.22.204", 443))
+        self.assertEqual(s.country, "latvia")          # страна из #Латвия
+        self.assertEqual(s.params["id"], "71c8bb98-ab9b-4bec-83bb-e32cf870b9d5")
+        self.assertEqual(s.params["flow"], "xtls-rprx-vision")
+        self.assertEqual(s.params["reality"]["publicKey"], "sMjQ93A1pjYo-vG91WS4N7TkPgfzI9kpqxkf5YVRW0I")
+        self.assertEqual(s.params["sni"], "tg.capynode.com")
+        ob = vpn._server_to_outbound(s)
+        self.assertEqual(ob["type"], "vless")
+        self.assertTrue(ob["tls"]["reality"]["enabled"])
+        self.assertEqual(ob["tls"]["utls"]["fingerprint"], "qq")
+
+    def test_vless_ws_tls_link(self):
+        s = self._one(WS_TLS_LINK)
+        self.assertEqual(s.kind, "vless-tls")
+        self.assertEqual(s.country, "netherlands")
+        self.assertEqual(s.name, "Нидерланды +")       # имя из фрагмента, без мусора
+        ob = vpn._server_to_outbound(s)
+        self.assertNotIn("reality", ob["tls"])
+        self.assertEqual(ob["transport"], {"type": "ws", "path": "/ws",
+                                           "headers": {"Host": "nl1.example.com"}})
+
+    def test_trojan_grpc_reality_link(self):
+        s = self._one(TROJAN_GRPC_LINK)
+        self.assertEqual(s.kind, "trojan-reality")
+        self.assertEqual(s.params["password"], "secretpass")
+        ob = vpn._server_to_outbound(s)
+        self.assertEqual(ob["type"], "trojan")
+        self.assertEqual(ob["transport"], {"type": "grpc", "service_name": "grpcsvc"})
+
+    def test_hysteria2_link_with_obfs(self):
+        s = self._one(HY2_LINK)
+        self.assertEqual((s.kind, s.address, s.port), ("hysteria2", "fi.example.org", 8447))
+        self.assertEqual(s.params["auth"], "mypass")
+        ob = vpn._server_to_outbound(s)
+        self.assertTrue(ob["tls"]["insecure"])         # insecure=1 в ссылке
+        self.assertEqual(ob["obfs"], {"type": "salamander", "password": "op"})
+
+    def test_shadowsocks_legacy_base64_creds(self):
+        s = self._one(SS_LINK)
+        self.assertEqual(s.kind, "shadowsocks")
+        self.assertEqual(s.params["method"], "aes-256-gcm")
+        self.assertEqual(s.params["password"], "sspass")
+        ob = vpn._server_to_outbound(s)
+        self.assertEqual((ob["type"], ob["method"]), ("shadowsocks", "aes-256-gcm"))
+
+    def test_vmess_link(self):
+        s = self._one(_vmess_link())
+        self.assertEqual(s.kind, "vmess")
+        self.assertEqual(s.params["id"], "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
+        ob = vpn._server_to_outbound(s)
+        self.assertEqual(ob["type"], "vmess")
+        self.assertEqual(ob["transport"]["type"], "ws")
+
+    def test_base64_list_of_links(self):
+        """Панель отдаёт base64 от списка ссылок — это и есть «тот же список, что в Happ»."""
+        text = "\n".join([REALITY_LINK, WS_TLS_LINK, TROJAN_GRPC_LINK, HY2_LINK])
+        b64 = base64.b64encode(text.encode()).decode()
+        srvs = vpn.parse_servers(b64)
+        self.assertEqual(len(srvs), 4)
+        self.assertEqual([s.kind for s in srvs],
+                         ["hysteria2", "vless-reality", "trojan-reality", "vless-tls"])
+
+    def test_domestic_link_is_filtered(self):
+        self.assertEqual(vpn.parse_servers(RU_LINK), [])
+
+    def test_garbage_lines_do_not_break_import(self):
+        text = "мусор\n" + REALITY_LINK + "\nне ссылка вовсе\n" + WS_TLS_LINK
+        self.assertEqual(len(vpn.parse_servers(text)), 2)
+
+    def test_same_server_from_json_and_link_is_deduped(self):
+        """Один и тот же выход, пришедший и профилем, и ссылкой, не должен двоиться."""
+        prof = _finland_vless_profile()
+        link = ("vless://11111111-1111-1111-1111-111111111111@1.2.3.4:443"
+                "?security=reality&sni=a.com&pbk=K&type=tcp#Финляндия")
+        text = json.dumps([prof]) + "\n" + link
+        srvs = vpn.parse_servers(text)
+        addrs = [(s.address, s.port) for s in srvs]
+        self.assertEqual(len(addrs), len(set(addrs)))
+
+
 class TestSingboxAcceptsConfigs(unittest.TestCase):
     """Наши конфиги обязан принимать НАСТОЯЩИЙ sing-box (`sing-box check`).
 
@@ -440,6 +567,16 @@ class TestSingboxAcceptsConfigs(unittest.TestCase):
     def test_probe_config_chained(self):
         chained, _ = self._servers()
         self._check(vpn.build_probe_config(chained, 1080))
+
+    def test_probe_config_for_every_link_protocol(self):
+        """Новые протоколы из share-ссылок тоже обязаны проходить `sing-box check`."""
+        links = [WS_TLS_LINK, TROJAN_GRPC_LINK, HY2_LINK, SS_LINK, _vmess_link()]
+        srvs = vpn.parse_servers("\n".join(links))
+        self.assertEqual(len(srvs), len(links))
+        for s in srvs:
+            with self.subTest(kind=s.kind):
+                self._check(vpn.build_probe_config(s, 1080))
+                self._check(vpn.build_singbox_config(s))
 
 
 class TestLiveness(unittest.TestCase):

@@ -27,6 +27,11 @@ DEFAULTS: dict[str, Any] = {
     "vpn_country": "",      # выбранная страна-выход ("" = авто; "__other__" = прочие);
                             # внутри страны сервер выбираем по живости (не фиксированный)
     "vpn_enabled": False,   # держать ли туннель включённым (по A1 — пока сам не отключит)
+    "vpn_hwid": "",         # ID устройства для панелей с device-limit (X-HWID). Пусто =
+                            # сгенерируем свой при первом импорте; можно вставить ID из Happ
+    "vpn_panel_announce": "",  # сообщение панели (заголовок Announce) — показываем в UI
+    "vpn_panel_title": "",     # название подписки из панели (Profile-Title)
+    "vpn_panel_provider": "",  # Providerid панели (для поддержки/диагностики)
     # Соединение Telegram: локальный MTProto-прокси -> WebSocket к веб-входу Telegram.
     # Ядро вендорено из Flowseal/tg-ws-proxy (см. freeconnect/tgws/UPSTREAM.md).
     "tg_port": 1443,        # порт локального прокси (по умолчанию как у ядра); если занят —

@@ -314,12 +314,25 @@
         </div>
         <button class="link-btn" id="vpnPasteJsonBtn">или вставить конфиг (JSON)</button>
         <textarea id="vpnJson" class="vpn-input vpn-json" style="display:none" placeholder="[{ … }] — конфиг xray"></textarea>
+        <div class="vpn-announce" id="vpnAnnounce" hidden></div>
       </div>
 
       <div class="vpn-section">
         <div class="vpn-label">Сервер</div>
         <div class="vpn-server-list" id="vpnServer"></div>
         <div class="settings-note" id="vpnServerNote">Импортируй подписку, чтобы выбрать страну.</div>
+      </div>
+
+      <div class="vpn-section">
+        <div class="vpn-label">ID устройства (HWID)</div>
+        <div class="vpn-row">
+          <input type="text" id="vpnHwid" class="vpn-input" placeholder="свой ID или скопированный из Happ"
+                 autocomplete="off" spellcheck="false">
+          <button class="btn small" id="vpnHwidSave">Сохранить</button>
+        </div>
+        <div class="settings-note">Панели с привязкой к устройству без этого ID отдают заглушку — один нерабочий
+          сервер. Свой ID создаётся автоматически; чтобы не занимать отдельное устройство, вставь сюда ID из Happ
+          (подписка → «Your HWID» → «Copy HWID»).</div>
       </div>
 
       <label class="toggle-row vpn-main-toggle">

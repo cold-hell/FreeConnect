@@ -27,6 +27,7 @@ import re
 import socket
 import ssl
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 
 # Известные зарубежные страны в тегах/remarks -> (флаг, читаемое имя).
@@ -63,8 +64,26 @@ COUNTRIES: dict[str, tuple[str, str]] = {
 }
 # Домашние (RU) входы обходят белые списки внутри РФ — как выход для Discord не годятся.
 RU_MARKERS = ("🇷🇺", "russia", "россия", "russian", "moscow", "москва", "spb", "питер")
-# Порядок предпочтения протоколов: Hysteria2 первым (UDP-ядро — лучший голос).
-KIND_RANK = {"hysteria2": 0, "vless-reality": 1, "trojan-reality": 2}
+# Порядок предпочтения протоколов: Hysteria2 первым (UDP-ядро — лучший голос),
+# далее Reality (маскировка под чужой TLS), затем обычный TLS и прочее.
+KIND_RANK = {"hysteria2": 0, "vless-reality": 1, "trojan-reality": 2,
+             "vless-tls": 3, "trojan-tls": 4, "vmess": 5, "shadowsocks": 6}
+
+# Схемы share-ссылок, которые умеем разбирать (самый ходовой формат подписок:
+# панель отдаёт их как base64-список строк, а не как JSON).
+LINK_SCHEMES = ("vless://", "trojan://", "ss://", "hysteria2://", "hy2://", "vmess://")
+
+# Признаки «заглушки» панели: клиенту, которого панель не признала (не прислал
+# HWID/устройство не разрешено), она отдаёт ОДИН нерабочий сервер с такой пометкой
+# в имени. Без этой проверки причина выглядела как «VPN не подключается».
+STUB_MARKERS = ("данное приложение не поддерживается", "app is not supported",
+                "application is not supported", "unsupported client", "unsupported app")
+
+
+def looks_like_stub(text: str) -> bool:
+    """Похоже ли, что панель отдала заглушку вместо настоящего списка серверов."""
+    low = (text or "").lower()
+    return any(m in low for m in STUB_MARKERS)
 
 
 @dataclass
@@ -138,8 +157,51 @@ def _clean_name(remark: str) -> str:
 def _label(kind: str, country: str) -> str:
     flag, ru = COUNTRIES.get(country, ("🌍", "Сервер"))
     proto = {"hysteria2": "Hysteria2", "vless-reality": "VLESS-Reality",
-             "trojan-reality": "Trojan-Reality"}.get(kind, kind)
+             "trojan-reality": "Trojan-Reality", "vless-tls": "VLESS-TLS",
+             "trojan-tls": "Trojan-TLS", "vmess": "VMess",
+             "shadowsocks": "Shadowsocks"}.get(kind, kind)
     return f"{flag} {ru} · {proto}"
+
+
+def _try_json(text: str):
+    """JSON из текста либо None (без исключений — форматов подписки много)."""
+    try:
+        return json.loads(text)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _try_b64_text(text: str) -> str:
+    """base64 (возможно без padding, с переводами строк) -> текст. '' если не вышло."""
+    s = re.sub(r"\s+", "", text or "")
+    if len(s) < 8:
+        return ""
+    try:
+        raw = base64.b64decode(s + "=" * (-len(s) % 4), validate=False)
+    except Exception:  # noqa: BLE001
+        return ""
+    out = raw.decode("utf-8", "replace")
+    # Мусор от «дешифровки» произвольного текста отсеиваем: в подписке должны быть
+    # либо ссылки, либо JSON, либо base64-внутренность.
+    if any(sch in out for sch in LINK_SCHEMES) or out.lstrip()[:1] in "[{":
+        return out
+    for line in out.splitlines():
+        inner = _try_b64_text(line) if len(line) > 8 else ""
+        if inner:
+            return inner
+    return ""
+
+
+def _as_profiles(obj) -> list:
+    """Обёртки подписки вокруг массива xray-профилей."""
+    if isinstance(obj, list):
+        return obj
+    if isinstance(obj, dict):
+        for k in ("configs", "outbounds", "servers", "data"):
+            if isinstance(obj.get(k), list):
+                return obj[k]
+        return [obj]
+    return []
 
 
 def decode_subscription(text: str) -> list[dict]:
@@ -148,34 +210,210 @@ def decode_subscription(text: str) -> list[dict]:
     text = (text or "").strip()
     if not text:
         raise ValueError("пустая подписка")
+    obj = _try_json(text)
+    if obj is None:
+        decoded = _try_b64_text(text)
+        if decoded:
+            obj = _try_json(decoded)
+    if obj is None:
+        raise ValueError("не удалось разобрать подписку: это не JSON-профили")
+    return _as_profiles(obj)
 
-    def _as_profiles(obj):
-        if isinstance(obj, list):
-            return obj
-        if isinstance(obj, dict):
-            # частые обёртки
-            for k in ("configs", "outbounds", "servers", "data"):
-                if isinstance(obj.get(k), list):
-                    return obj[k]
-            return [obj]
-        raise ValueError("неожиданная структура подписки")
 
-    # 1) прямой JSON
+# ---- Share-ссылки: vless://, trojan://, ss://, hysteria2://, vmess:// ----
+# Самый ходовой формат подписки: панель отдаёт base64 от списка строк. Раньше мы
+# такие подписки не понимали ВООБЩЕ (0 серверов) — из-за этого «в Happ серверы
+# есть, а в FreeConnect нет».
+
+def extract_links(text: str) -> list[str]:
+    """Все share-ссылки из текста (по строке на ссылку; терпим и склейку в строку)."""
+    out: list[str] = []
+    for line in (text or "").splitlines():
+        s = line.strip()
+        while s:
+            low = s.lower()
+            pos = -1
+            for sch in LINK_SCHEMES:
+                p = low.find(sch)
+                if p >= 0 and (pos < 0 or p < pos):
+                    pos = p
+            if pos < 0:
+                break
+            rest = s[pos:]
+            end = len(rest)
+            for i, ch in enumerate(rest):
+                if ch in " \t":
+                    end = i
+                    break
+            out.append(rest[:end])
+            s = rest[end:].strip()
+    return out
+
+
+def _link_parts(link: str) -> tuple[str, str, str, dict, str, str]:
+    """vless://user@host:port?params#name ->
+    (схема, userinfo, hostport, params, name, raw).
+
+    raw — часть после схемы без #-фрагмента и без query. Нужна для vmess://, где
+    весь payload это base64-объект без «@» (разбор по @ его бы разрушил)."""
+    scheme, _, rest = link.partition("://")
+    frag = ""
+    if "#" in rest:
+        rest, _, frag = rest.partition("#")
+    query: dict[str, str] = {}
+    if "?" in rest:
+        rest, _, q = rest.partition("?")
+        query = {k.lower(): v[-1] for k, v in urllib.parse.parse_qs(q, keep_blank_values=True).items()}
+    raw = rest
+    userinfo, hostport = "", rest
+    if "@" in rest:
+        userinfo, _, hostport = rest.rpartition("@")
+    return (scheme.lower(), urllib.parse.unquote(userinfo), hostport,
+            query, urllib.parse.unquote(frag).strip(), raw)
+
+
+def _b64_text(s: str) -> str:
+    """Прямой base64 -> текст (для креденшелов ss:// и JSON vmess://), '' если не вышло."""
     try:
-        return _as_profiles(json.loads(text))
-    except json.JSONDecodeError:
-        pass
-    # 2) base64 -> JSON
+        raw = base64.b64decode((s or "").strip() + "=" * (-len(s or "") % 4), validate=False)
+        return raw.decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _host_port(hostport: str, default_port: int = 443) -> tuple[str, int]:
+    hp = (hostport or "").strip()
+    if hp.startswith("["):                      # IPv6: [::1]:443
+        host, _, tail = hp.partition("]")
+        host = host.lstrip("[")
+        port = tail.lstrip(":").split("/")[0]
+    else:
+        host, _, port = hp.rpartition(":")
+        if not host:                            # порта нет вовсе
+            host, port = hp, ""
+    host = host.strip().strip("/")
     try:
-        pad = "=" * (-len(text) % 4)
-        raw = base64.b64decode(text + pad, validate=False).decode("utf-8", "replace")
-        return _as_profiles(json.loads(raw))
-    except Exception as e:  # noqa: BLE001
-        raise ValueError(f"не удалось разобрать подписку: {e}")
+        return host, int(port)
+    except (TypeError, ValueError):
+        return host, default_port
+
+
+def _transport_params(q: dict) -> dict:
+    """Общие для ссылок сетевые параметры (транспорт + TLS) в наш внутренний вид."""
+    net = (q.get("type") or q.get("net") or "tcp").lower()
+    if net in ("h2", "http"):
+        net = "http"
+    security = (q.get("security") or q.get("tls") or "none").lower()
+    p: dict = {"network": net, "tlsMode": "reality" if security == "reality" else
+               ("tls" if security in ("tls", "xtls", "reality") else "none")}
+    sni = q.get("sni") or q.get("host") or q.get("peer") or ""
+    if q.get("fp"):
+        p["fingerprint"] = q["fp"]
+    if sni:
+        p["sni"] = sni
+    if (q.get("allowinsecure") or q.get("insecure") or "") in ("1", "true"):
+        p["insecure"] = True
+    if q.get("alpn"):
+        p["alpn"] = [a for a in urllib.parse.unquote(q["alpn"]).split(",") if a]
+    if security == "reality":
+        p["reality"] = {"publicKey": q.get("pbk", ""), "shortId": q.get("sid", ""),
+                        "serverName": sni, "fingerprint": q.get("fp", "chrome")}
+    if net == "ws":
+        p["path"] = q.get("path", "") or "/"
+        if q.get("host"):
+            p["host"] = q["host"]
+    elif net == "grpc":
+        p["serviceName"] = q.get("servicename", "") or q.get("path", "").lstrip("/")
+    elif net == "http":
+        p["path"] = q.get("path", "") or "/"
+        if q.get("host"):
+            p["host"] = q["host"]
+    elif net == "httpupgrade":
+        p["path"] = q.get("path", "") or "/"
+        if q.get("host"):
+            p["host"] = q["host"]
+    return p
+
+
+def _link_to_server(link: str) -> Server | None:
+    """Одна share-ссылка -> Server (или None, если протокол нам не подходит)."""
+    try:
+        scheme, userinfo, hostport, q, name, raw = _link_parts(link)
+        addr, port = _host_port(hostport)
+        if not addr or not port:
+            return None
+        country = _country_from_text(name)
+
+        if scheme == "vless":
+            p = _transport_params(q)
+            p["id"] = userinfo
+            if q.get("flow"):
+                p["flow"] = q["flow"]
+            kind = "vless-reality" if p["tlsMode"] == "reality" else "vless-tls"
+            return Server(kind=kind, address=addr, port=port, country=country,
+                          name=name, params=p)
+
+        if scheme == "trojan":
+            p = _transport_params(q)
+            p["password"] = userinfo
+            kind = "trojan-reality" if p["tlsMode"] == "reality" else "trojan-tls"
+            return Server(kind=kind, address=addr, port=port, country=country,
+                          name=name, params=p)
+
+        if scheme in ("hysteria2", "hy2"):
+            p = {"auth": userinfo, "sni": q.get("sni", ""),
+                 "alpn": [a for a in (q.get("alpn") or "h3").split(",") if a]}
+            if (q.get("insecure") or "") in ("1", "true"):
+                p["insecure"] = True
+            if q.get("pinSHA256"):
+                p["pinnedSha256"] = q["pinSHA256"]
+            if q.get("obfs"):
+                p["obfs"] = q["obfs"]
+                p["obfsPassword"] = q.get("obfs-password", "")
+            return Server(kind="hysteria2", address=addr, port=port, country=country,
+                          name=name, params=p)
+
+        if scheme == "ss":
+            # ss://base64(method:password)@host:port  |  ss://method:password@host:port
+            cred = userinfo
+            if ":" not in cred:
+                cred = _b64_text(cred).strip()
+            if ":" not in cred:
+                return None
+            method, _, password = cred.partition(":")
+            if not method or not password or q.get("plugin"):
+                return None                          # плагины не конвертируем — не гадаем
+            return Server(kind="shadowsocks", address=addr, port=port, country=country,
+                          name=name,
+                          params={"method": method.strip().lower(), "password": password})
+
+        if scheme == "vmess":
+            payload = raw.rpartition("@")[2]         # у vmess весь payload — base64 без «@»
+            obj = _try_json(_b64_text(payload))
+            if not isinstance(obj, dict):
+                return None
+            addr = str(obj.get("add") or addr).strip()
+            try:
+                port = int(obj.get("port") or port)
+            except (TypeError, ValueError):
+                return None
+            q2 = {"type": obj.get("net", "tcp"), "security": obj.get("tls", ""),
+                  "sni": obj.get("sni", "") or obj.get("host", ""), "host": obj.get("host", ""),
+                  "path": obj.get("path", ""), "fp": obj.get("fp", "")}
+            p = _transport_params(q2)
+            p["id"] = str(obj.get("id", ""))
+            p["vmessSecurity"] = str(obj.get("scy") or obj.get("security") or "auto")
+            p["alterId"] = int(obj.get("aid", 0) or 0)
+            nm = str(obj.get("ps") or name or "")
+            return Server(kind="vmess", address=addr, port=port,
+                          country=_country_from_text(nm), name=nm, params=p)
+    except Exception:  # noqa: BLE001 — битая строка в подписке не должна ломать импорт
+        return None
+    return None
 
 
 def _outbound_to_server(o: dict, fallback_country: str = "") -> Server | None:
-    """Один xray-аутбаунд -> Server, либо None если не пригоден для MVP.
+    """Один xray-аутбаунд -> Server, либо None если не пригоден.
     fallback_country — страна из remarks профиля (когда тег её не содержит,
     напр. hysteria2-выходы с тегом hy2in-88)."""
     proto = o.get("protocol")
@@ -199,33 +437,66 @@ def _outbound_to_server(o: dict, fallback_country: str = "") -> Server | None:
                               "pinnedSha256": tls.get("pinnedPeerCertSha256", ""),
                               "alpn": tls.get("alpn", ["h3"])})
 
-    if proto in ("vless", "trojan") and ss.get("security") == "reality":
+    if proto in ("vless", "trojan", "vmess") and ss.get("security") in ("reality", "tls",
+                                                                       "xtls", "none", ""):
         vnext = (o.get("settings", {}) or {}).get("vnext") or []
         servers = (o.get("settings", {}) or {}).get("servers") or []
         node = vnext[0] if vnext else (servers[0] if servers else None)
         if not node or not node.get("address") or not node.get("port"):
             return None
         rs = ss.get("realitySettings", {}) or {}
+        ts = ss.get("tlsSettings", {}) or {}
         net = ss.get("network", "tcp")
-        common = {
+        security = ss.get("security") or ""
+        common: dict = {
             "network": net,
-            "reality": {"publicKey": rs.get("publicKey", ""), "shortId": rs.get("shortId", ""),
-                        "serverName": rs.get("serverName", ""), "fingerprint": rs.get("fingerprint", "chrome")},
+            "tlsMode": "reality" if security == "reality" else
+                       ("tls" if security in ("tls", "xtls") else "none"),
         }
+        if security == "reality":
+            common["reality"] = {"publicKey": rs.get("publicKey", ""),
+                                 "shortId": rs.get("shortId", ""),
+                                 "serverName": rs.get("serverName", ""),
+                                 "fingerprint": rs.get("fingerprint", "chrome")}
+        elif security in ("tls", "xtls"):
+            common["sni"] = ts.get("serverName", "") or node.get("address", "")
+            common["fingerprint"] = ts.get("fingerprint", "chrome")
+            if ts.get("allowInsecure"):
+                common["insecure"] = True
+        if ts.get("alpn"):
+            common["alpn"] = ts["alpn"]
         if net == "grpc":
             common["grpcServiceName"] = (ss.get("grpcSettings", {}) or {}).get("serviceName", "")
         elif net == "xhttp":
             common["xhttpPath"] = (ss.get("xhttpSettings", {}) or {}).get("path", "")
+        elif net in ("ws", "websocket"):
+            ws = ss.get("wsSettings", {}) or {}
+            common["path"] = ws.get("path", "") or "/"
+            common["host"] = (ws.get("headers", {}) or {}).get("Host", "")
         if proto == "vless":
             user = (node.get("users") or [{}])[0]
             common["id"] = user.get("id", "")
             common["flow"] = user.get("flow", "")
-            kind = "vless-reality"
+            kind = "vless-reality" if security == "reality" else "vless-tls"
+        elif proto == "vmess":
+            user = (node.get("users") or [{}])[0]
+            common["id"] = user.get("id", "")
+            common["vmessSecurity"] = user.get("security", "auto") or "auto"
+            common["alterId"] = int(user.get("alterId", 0) or 0)
+            kind = "vmess"
         else:
             common["password"] = node.get("password", "")
-            kind = "trojan-reality"
+            kind = "trojan-reality" if security == "reality" else "trojan-tls"
         return Server(kind=kind, address=node["address"], port=int(node["port"]),
                       country=country, params=common)
+
+    if proto == "shadowsocks":
+        node = ((o.get("settings", {}) or {}).get("servers") or [None])[0]
+        if not node or not node.get("address") or not node.get("port"):
+            return None
+        return Server(kind="shadowsocks", address=node["address"], port=int(node["port"]),
+                      country=country, params={"method": node.get("method", ""),
+                                               "password": node.get("password", "")})
 
     return None
 
@@ -233,11 +504,60 @@ def _outbound_to_server(o: dict, fallback_country: str = "") -> Server | None:
 def parse_servers(text: str) -> list[Server]:
     """Подписка -> отсортированный список уникальных зарубежных серверов-выходов.
 
+    Понимает все ходовые форматы подписки:
+    - JSON-массив xray-профилей (Happ/Streisand) и объект-обёртку вокруг него;
+    - base64 от JSON;
+    - base64 от списка share-ссылок (vless://, trojan://, ss://, hysteria2://, vmess://);
+    - просто список share-ссылок текстом.
+
     Берём ВСЕ пригодные для конвертации зарубежные серверы — даже если страну не
     опознали (тогда имя берём из remarks). Отсеиваем только домашние RU-входы и
-    цепочки (dialerProxy). Раньше выбрасывались все неопознанные страны, из-за чего
-    список был куда беднее, чем в самом клиенте подписки."""
-    profiles = decode_subscription(text)
+    неполные цепочки (dialerProxy). Раньше выбрасывались все неопознанные страны,
+    а формат «base64 со ссылками» (самый частый!) не поддерживался вообще."""
+    text = (text or "").strip()
+    if not text:
+        return []
+
+    profiles: list = []
+    links: list[str] = []
+    obj = _try_json(text)
+    if obj is not None:
+        profiles = _as_profiles(obj)
+    else:
+        decoded = _try_b64_text(text)
+        if decoded:
+            inner = _try_json(decoded)
+            if inner is not None:
+                profiles = _as_profiles(inner)
+            else:
+                links = extract_links(decoded)
+        if not profiles and not links:
+            links = extract_links(text)
+
+    out = _servers_from_profiles(profiles) + _servers_from_links(links)
+    seen: set[tuple] = set()
+    uniq: list[Server] = []
+    for s in out:
+        k = s.key()
+        if k in seen:
+            continue
+        seen.add(k)
+        uniq.append(s)
+    # Сортировка: сначала «лучший» протокол (UDP-ядро), потом страна, потом имя.
+    uniq.sort(key=lambda s: (KIND_RANK.get(s.kind, 9), s.country or "zzz", s.name, s.address))
+    return uniq
+
+
+def _name_for(srv: Server, remark: str) -> str:
+    """Имя строки: своё из remarks (так «Нидерланды +» видно как есть), иначе
+    синтезируем из страны+протокола, иначе — из адреса."""
+    return (_clean_name(remark)
+            or (_label(srv.kind, srv.country) if srv.country else "")
+            or f"{srv.address} · {_label(srv.kind, '')}")
+
+
+def _servers_from_profiles(profiles: list) -> list[Server]:
+    """xray-профили -> Server'ы (с учётом цепочек dialerProxy)."""
     seen: set[tuple] = set()
     out: list[Server] = []
     for prof in profiles:
@@ -279,13 +599,22 @@ def parse_servers(text: str) -> list[Server]:
             if srv.key() in seen:
                 continue
             seen.add(srv.key())
-            # Имя: сначала своё из remarks (так «Нидерланды +» видно как есть),
-            # иначе синтезируем из страны+протокола, иначе — из адреса.
-            srv.name = (_clean_name(remarks)
-                        or (_label(srv.kind, srv.country) if srv.country else "")
-                        or f"{srv.address} · {_label(srv.kind, '')}")
+            srv.name = _name_for(srv, remarks)
             out.append(srv)
-    out.sort(key=lambda s: (KIND_RANK.get(s.kind, 9), s.country or "zzz", s.name, s.address))
+    return out
+
+
+def _servers_from_links(links: list[str]) -> list[Server]:
+    """Share-ссылки -> Server'ы. Имя и страна — из фрагмента ссылки (#Нидерланды)."""
+    out: list[Server] = []
+    for link in links:
+        srv = _link_to_server(link)
+        if not srv:
+            continue
+        if _is_domestic(srv.name, srv.country):
+            continue
+        srv.name = _name_for(srv, srv.name)
+        out.append(srv)
     return out
 
 
@@ -517,6 +846,59 @@ DISCORD_PROCESSES = ["Discord.exe", "DiscordPTB.exe", "DiscordCanary.exe",
                      "DiscordDevelopment.exe"]
 
 
+def _tls_block(p: dict) -> dict | None:
+    """TLS-блок sing-box из наших параметров: Reality / обычный TLS / без TLS.
+
+    Формат params у нас двух поколений (JSON-профили пишут `reality`, парсер
+    share-ссылок — `tlsMode`+`reality`), поэтому читаем оба."""
+    reality = p.get("reality") or {}
+    mode = p.get("tlsMode") or ("reality" if reality else "none")
+    sni = p.get("sni") or reality.get("serverName", "") or ""
+    fp = p.get("fingerprint") or reality.get("fingerprint", "chrome")
+    if mode == "reality" and reality:
+        tls = {"enabled": True, "server_name": sni,
+               "utls": {"enabled": True, "fingerprint": fp or "chrome"},
+               "reality": {"enabled": True, "public_key": reality.get("publicKey", ""),
+                           "short_id": reality.get("shortId", "")}}
+    elif mode == "tls":
+        tls = {"enabled": True, "server_name": sni,
+               "utls": {"enabled": True, "fingerprint": fp or "chrome"}}
+    else:
+        return None
+    if p.get("alpn"):
+        tls["alpn"] = list(p["alpn"])
+    if p.get("insecure") or p.get("pinnedSha256"):
+        # Самоподписанный/подменный сертификат (pinned sha256) — обычная TLS-проверка
+        # не пройдёт, поэтому отключаем строгость, как и делает исходный клиент.
+        tls["insecure"] = True
+    return tls
+
+
+def _transport_block(p: dict) -> dict | None:
+    """Транспорт sing-box по сети из ссылки/профиля (tcp = по умолчанию, без блока)."""
+    net = (p.get("network") or "tcp").lower()
+    if net == "grpc":
+        return {"type": "grpc", "service_name": p.get("serviceName")
+                or p.get("grpcServiceName", "")}
+    if net in ("ws", "websocket"):
+        tr = {"type": "ws", "path": p.get("path") or "/"}
+        if p.get("host"):
+            tr["headers"] = {"Host": p["host"]}
+        return tr
+    if net in ("http", "xhttp", "h2"):
+        # sing-box зовёт это http; путь переносим как есть.
+        tr = {"type": "http", "path": p.get("path") or p.get("xhttpPath") or "/"}
+        if p.get("host"):
+            tr["host"] = [p["host"]]
+        return tr
+    if net == "httpupgrade":
+        tr = {"type": "httpupgrade", "path": p.get("path") or "/"}
+        if p.get("host"):
+            tr["host"] = p["host"]
+        return tr
+    return None
+
+
 def _server_to_outbound(s: Server, tag: str = "vpn") -> dict:
     """Server -> outbound sing-box. ВНИМАНИЕ: маппинг проверяется вживую на машине
     (sing-box + реальный сервер); здесь — по схеме sing-box 1.x."""
@@ -526,33 +908,42 @@ def _server_to_outbound(s: Server, tag: str = "vpn") -> dict:
               "password": p.get("auth", ""),
               "tls": {"enabled": True, "server_name": p.get("sni", ""),
                       "alpn": p.get("alpn", ["h3"])}}
-        # Самоподписанный/подменный SNI (pinned sha256 в xray) — обычная TLS-валидация
-        # не пройдёт, поэтому отключаем строгую проверку (как и делает исходный клиент).
-        if p.get("pinnedSha256"):
+        if p.get("insecure") or p.get("pinnedSha256"):
             ob["tls"]["insecure"] = True
+        if p.get("obfs"):
+            ob["obfs"] = {"type": p["obfs"], "password": p.get("obfsPassword", "")}
         return ob
 
-    reality = p.get("reality", {})
-    tls = {"enabled": True, "server_name": reality.get("serverName", ""),
-           "utls": {"enabled": True, "fingerprint": reality.get("fingerprint", "chrome")},
-           "reality": {"enabled": True, "public_key": reality.get("publicKey", ""),
-                       "short_id": reality.get("shortId", "")}}
-    net = p.get("network", "tcp")
-    transport = None
-    if net == "grpc":
-        transport = {"type": "grpc", "service_name": p.get("grpcServiceName", "")}
-    elif net == "xhttp":
-        # sing-box зовёт это http; путь переносим как есть.
-        transport = {"type": "http", "path": p.get("xhttpPath", "")}
+    if s.kind == "shadowsocks":
+        ob = {"type": "shadowsocks", "tag": tag, "server": s.address, "server_port": s.port,
+              "method": p.get("method", ""), "password": p.get("password", "")}
+        tr = _transport_block(p)
+        if tr:
+            ob["transport"] = tr
+        return ob
 
-    if s.kind == "vless-reality":
+    tls = _tls_block(p)
+    transport = _transport_block(p)
+
+    if s.kind == "vmess":
+        ob = {"type": "vmess", "tag": tag, "server": s.address, "server_port": s.port,
+              "uuid": p.get("id", ""),
+              "security": p.get("vmessSecurity") or "auto",
+              "alter_id": int(p.get("alterId", 0) or 0)}
+        if tls:
+            ob["tls"] = tls
+    elif s.kind == "vless-reality" or s.kind == "vless-tls":
         ob = {"type": "vless", "tag": tag, "server": s.address, "server_port": s.port,
-              "uuid": p.get("id", ""), "tls": tls}
+              "uuid": p.get("id", "")}
+        if tls:
+            ob["tls"] = tls
         if p.get("flow"):
             ob["flow"] = p["flow"]
-    else:  # trojan-reality
+    else:  # trojan-reality / trojan-tls
         ob = {"type": "trojan", "tag": tag, "server": s.address, "server_port": s.port,
-              "password": p.get("password", ""), "tls": tls}
+              "password": p.get("password", "")}
+        if tls:
+            ob["tls"] = tls
     if transport:
         ob["transport"] = transport
     return ob

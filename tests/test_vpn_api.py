@@ -333,5 +333,151 @@ class TestVpnApi(unittest.TestCase):
         self.assertEqual(ob["type"], "vless")
 
 
+class _SubResp:
+    """Ответ urlopen с заголовками панели (как у настоящего sub-сервиса)."""
+
+    def __init__(self, body: bytes, headers: dict | None = None):
+        self._body = body
+        self.headers = headers or {}
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class TestSubscriptionClientIdentity(unittest.TestCase):
+    """Панели с привязкой к устройству (Happ-шлюзы, 3x-ui/Remnawave device-limit).
+
+    Без X-HWID такая панель отдаёт ЗАГЛУШКУ: один мёртвый сервер и remarks
+    «Данное приложение не поддерживается». Ровно на этом ломался импорт: в Happ
+    серверы есть, в FreeConnect — нет."""
+
+    def setUp(self):
+        self._orig_save = fcapp.config.save
+        fcapp.config.save = lambda c: None
+        self._orig_urlopen = __import__("urllib.request", fromlist=["urlopen"]).urlopen
+
+    def tearDown(self):
+        fcapp.config.save = self._orig_save
+        import urllib.request
+        urllib.request.urlopen = self._orig_urlopen
+
+    @staticmethod
+    def _links_body() -> bytes:
+        import base64
+        links = "\n".join([
+            "vless://11111111-1111-1111-1111-111111111111@nl.example.com:443"
+            "?security=reality&sni=a.com&pbk=sMjQ93A1pjYo-vG91WS4N7TkPgfzI9kpqxkf5YVRW0I"
+            "&type=tcp#%D0%9D%D0%B8%D0%B4%D0%B5%D1%80%D0%BB%D0%B0%D0%BD%D0%B4%D1%8B",
+            "trojan://pw@de.example.com:443?security=tls&sni=de.example.com&type=ws&path=%2Fw"
+            "#%D0%93%D0%B5%D1%80%D0%BC%D0%B0%D0%BD%D0%B8%D1%8F",
+        ])
+        return base64.b64encode(links.encode())
+
+    def test_hwid_headers_are_sent(self):
+        import urllib.request
+        seen = {}
+
+        def fake_urlopen(req, timeout=0):
+            seen["headers"] = {k.lower(): v for k, v in req.headers.items()}
+            return _SubResp(self._links_body())
+
+        urllib.request.urlopen = fake_urlopen
+        api = _api()
+        st = api.vpn_import(url="https://sub.example/abc")
+        self.assertTrue(st["ok"])
+        self.assertEqual(len(st["servers"]), 2)          # base64-список ссылок разобран
+        h = seen["headers"]
+        self.assertTrue(h.get("x-hwid"), "без X-HWID панель отдаёт заглушку")
+        self.assertEqual(h.get("x-device-os"), "Windows")
+        for key in ("x-ver-os", "x-device-model", "x-app-version", "x-device-locale"):
+            self.assertIn(key, h)
+        self.assertEqual(st["hwid"], h["x-hwid"])        # тот же ID виден в UI
+
+    def test_hwid_from_subscription_url_wins(self):
+        """Ссылка-«HWID-подписка» сама диктует устройство: параметр HWID в URL."""
+        import urllib.request
+        seen = {}
+
+        def fake_urlopen(req, timeout=0):
+            seen["hwid"] = req.headers.get("X-Hwid") or req.headers.get("X-hwid")
+            return _SubResp(self._links_body())
+
+        urllib.request.urlopen = fake_urlopen
+        api = _api(cfg={"vpn_hwid": "из-настроек"})
+        st = api.vpn_import(url="https://sub.example/abc?HWID=deadbeefdeadbeef")
+        self.assertEqual(st["hwid"], "deadbeefdeadbeef")
+        self.assertEqual(seen["hwid"], "deadbeefdeadbeef")
+
+    def test_panel_announce_is_surfaced_with_device_hint(self):
+        import base64
+        import urllib.request
+        announce = ("ПОДКЛЮЧИЛ МАКС. КОЛИЧЕСТВО УСТРОЙСТВ. ЗАЙДИТЕ В РАЗДЕЛ «УСТРОЙСТВА»")
+        hdr = {"Announce": "base64:" + base64.b64encode(announce.encode()).decode(),
+               "Profile-Title": "base64:" + base64.b64encode("Capybara VPN".encode()).decode()}
+        urllib.request.urlopen = lambda req, timeout=0: _SubResp(self._links_body(), hdr)
+        api = _api()
+        st = api.vpn_import(url="https://sub.example/abc")
+        self.assertIn("устройства".lower(), st["announce"].lower())
+        self.assertEqual(st["panel_title"], "Capybara VPN")
+        self.assertIn("Устройства", st["warning"])       # подсказка, что делать
+
+    def test_stub_response_warns_about_hwid(self):
+        """Заглушка панели («приложение не поддерживается») — не молчаливый успех."""
+        import urllib.request
+        stub = json.dumps([{
+            "remarks": "Данное приложение не поддерживается",
+            "outbounds": [{"tag": "proxy", "protocol": "vless",
+                           "settings": {"vnext": [{"address": "188.253.22.204", "port": 443,
+                                                   "users": [{"id": "u", "flow": "xtls-rprx-vision"}]}]},
+                           "streamSettings": {"network": "tcp", "security": "reality",
+                                              "realitySettings": {"publicKey": "K", "serverName": "s"}}}]}])
+        urllib.request.urlopen = lambda req, timeout=0: _SubResp(stub.encode(), {})
+        api = _api()
+        st = api.vpn_import(url="https://sub.example/abc")
+        self.assertTrue(st["ok"])
+        self.assertIn("заглушку", st["warning"])
+
+    def test_set_hwid_reimports_subscription(self):
+        import urllib.request
+        seen = {}
+
+        def fake_urlopen(req, timeout=0):
+            seen["hwid"] = req.headers.get("X-Hwid") or req.headers.get("X-hwid")
+            return _SubResp(self._links_body())
+
+        urllib.request.urlopen = fake_urlopen
+        api = _api(cfg={"vpn_sub_url": "https://sub.example/abc"})
+        st = api.vpn_set_hwid("abcdef0123456789")
+        self.assertTrue(st["ok"])
+        self.assertEqual(st["hwid"], "abcdef0123456789")
+        self.assertEqual(seen["hwid"], "abcdef0123456789")
+
+    def test_links_subscription_beats_json_stub(self):
+        """Из ответов разных UA берём тот, где серверов БОЛЬШЕ (ради этого и перебор)."""
+        import urllib.request
+        calls = []
+
+        def fake_urlopen(req, timeout=0):
+            ua = req.headers.get("User-agent") or req.get_header("User-agent")
+            calls.append(ua)
+            if ua == "Streisand":
+                return _SubResp(self._links_body())     # 2 сервера ссылками
+            return _SubResp(json.dumps([{"remarks": "🇩🇪 Германия", "outbounds": [
+                {"tag": "t", "protocol": "hysteria", "settings": {"version": 2, "address": "1.1.1.1",
+                                                                  "port": 8447}}]}]).encode())
+
+        urllib.request.urlopen = fake_urlopen
+        api = _api()
+        st = api.vpn_import(url="https://sub.example/abc")
+        self.assertEqual(len(st["servers"]), 2)
+        self.assertEqual(calls[0], "Streisand")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -521,6 +521,13 @@ body.frameless .splash:not(.hide) ~ .win-controls{opacity:0;pointer-events:none}
 .vpn-json{height:90px;resize:vertical;margin-top:8px;font-family:monospace;font-size:12px}
 .btn.small{padding:8px 14px;font-size:13px;white-space:nowrap;flex:none}
 
+/* Сообщение панели подписки (Announce): лимит устройств, срок, просьба обновить.
+   Без него причина («кончились устройства») выглядела как «сервер не подключается». */
+.vpn-announce{margin-top:10px;padding:10px 12px;border-radius:10px;font-size:12px;line-height:1.5;
+  white-space:pre-line;color:var(--txt-dim);background:rgba(255,255,255,.03);
+  border:1px solid var(--panel-brd)}
+.vpn-announce.warn{background:rgba(255,200,97,.10);border-color:rgba(255,200,97,.30);color:var(--warn)}
+
 /* Кастомный выбор сервера (вместо нативного select) — карточки в стиле выбора стратегий */
 .vpn-server-list{max-height:250px;overflow-y:auto;margin:2px 0 8px;
   scrollbar-width:thin;scrollbar-color:var(--accent2) transparent}

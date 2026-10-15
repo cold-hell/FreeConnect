@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -896,7 +898,9 @@ class Api:
 
     # ---- VPN-для-Discord ----
     _VPN_PROTO = {"hysteria2": "Hysteria2", "vless-reality": "VLESS-Reality",
-                  "trojan-reality": "Trojan-Reality"}
+                  "trojan-reality": "Trojan-Reality", "vless-tls": "VLESS-TLS",
+                  "trojan-tls": "Trojan-TLS", "vmess": "VMess",
+                  "shadowsocks": "Shadowsocks"}
 
     def _vpn_country_ru(self, country: str) -> str:
         return vpn.COUNTRIES.get(country, ("", "Сервер"))[1]
@@ -949,30 +953,133 @@ class Api:
             "available": self.singbox.available(),   # забандлен ли бинарник sing-box
             "imported": bool(self._vpn_servers),
             "servers": self._vpn_server_rows(),
+            "count": len(self._vpn_servers),         # серверов всего (строк может быть меньше)
             "selected": self._vpn_selected() or "auto",
             "enabled": self.singbox.is_running(),
             "sub_url": self.cfg.get("vpn_sub_url", ""),
+            "hwid": self.cfg.get("vpn_hwid", ""),
+            "panel_title": self.cfg.get("vpn_panel_title", ""),
+            "announce": self.cfg.get("vpn_panel_announce", ""),
         }
 
     # Разные sub-сервисы отдают конфиг ТОЛЬКО «знакомым» клиентам и режут чужой
     # User-Agent (напр. skippnet: наш UA → HTTP 445, а под Streisand отдаёт полный
     # xray-JSON). Перебираем распространённые UA и берём ответ, из которого удалось
     # вытащить больше всего серверов. Streisand первым — под него отдают Happ-JSON.
-    _SUB_UAGENTS = ["Streisand", "v2rayNG/1.9.5", "Happ/1.11.0", "clash-verge/1.5",
+    _SUB_UAGENTS = ["Streisand", "Happ/1.11.0", "v2rayNG/1.9.5", "clash-verge/1.5",
                     "sing-box", "FreeConnect"]
 
+    def vpn_hwid(self) -> str:
+        """ID устройства (HWID) для панелей с привязкой к устройству.
+
+        Это не «слежка»: панели-шлюзы Happ/3x-ui/Remnawave с включённым device-limit
+        отдают клиенту БЕЗ HWID заглушку — один нерабочий сервер и remarks вида
+        «Данное приложение не поддерживается». Свой ID = своя запись устройства."""
+        return str(self.cfg.get("vpn_hwid") or "").strip()
+
+    def _ensure_hwid(self, url: str = "") -> str:
+        """HWID из ссылки (параметр HWID) → из настроек → сгенерировать и запомнить.
+
+        Стабильность важна: от ID зависит запись устройства на панели, и он не должен
+        меняться от запуска к запуску (иначе копились бы «мёртвые» устройства)."""
+        url_hwid = ""
+        try:
+            src = url or str(self.cfg.get("vpn_sub_url") or "")
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(src).query)
+            url_hwid = (qs.get("HWID") or qs.get("hwid") or [""])[0].strip()
+        except Exception:  # noqa: BLE001
+            url_hwid = ""
+        hwid = self.vpn_hwid()
+        if url_hwid and url_hwid != hwid:
+            self.cfg["vpn_hwid"] = url_hwid        # ссылка сама диктует устройство
+            config.save(self.cfg)
+            return url_hwid
+        if hwid:
+            return hwid
+        hwid = os.urandom(16).hex()
+        self.cfg["vpn_hwid"] = hwid
+        config.save(self.cfg)
+        return hwid
+
+    def vpn_set_hwid(self, value) -> dict:
+        """Задать HWID вручную (напр. скопированный из Happ, чтобы не занимать
+        отдельное устройство) и, если ссылка уже есть, сразу перечитать подписку."""
+        val = str(value or "").strip()
+        self.cfg["vpn_hwid"] = val
+        config.save(self.cfg)
+        url = str(self.cfg.get("vpn_sub_url") or "").strip()
+        if url:
+            return self.vpn_import(url=url)
+        return {**self.vpn_get_state(), "ok": True,
+                "message": "ID устройства сохранён" if val else "ID устройства очищен"}
+
+    def _sub_headers(self, ua: str, url: str = "") -> dict:
+        """Заголовки «как у настоящего клиента»: панели с device-limit смотрят на
+        X-HWID и на платформу, а не только на User-Agent."""
+        headers = {"User-Agent": ua}
+        hwid = self._ensure_hwid(url)
+        if not hwid:
+            return headers
+        ver = ua.split("/", 1)[1] if "/" in ua else __version__
+        headers.update({
+            "X-HWID": hwid,
+            "X-Device-OS": "Windows",
+            "X-Ver-OS": f"{platform.release()} {platform.version()}".strip() or "Windows",
+            "X-Device-model": platform.machine() or "PC",
+            "X-App-Version": ver,
+            "X-Device-Locale": "ru",
+        })
+        return headers
+
+    @staticmethod
+    def _decode_panel_header(value: str) -> str:
+        """Значения заголовков панели (Announce/Profile-Title) бывают base64:…"""
+        v = str(value or "").strip()
+        if not v:
+            return ""
+        if v.lower().startswith("base64:"):
+            raw = v[7:].strip()
+            try:
+                import base64 as _b64
+                v = _b64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", "replace")
+            except Exception:  # noqa: BLE001
+                return raw
+        return v.strip()
+
+    def _panel_meta(self, headers) -> dict:
+        """Человекочитаемые сообщения панели: без них причина («кончились
+        устройства», «подписка истекла») оставалась невидимой для пользователя."""
+        get = (lambda k: headers.get(k, "") if headers else "")
+        announce = self._decode_panel_header(get("Announce"))
+        title = self._decode_panel_header(get("Profile-Title"))
+        meta = {
+            "title": title,
+            "announce": announce,
+            "provider": str(get("Providerid") or "").strip(),
+            "userinfo": str(get("Subscription-Userinfo") or "").strip(),
+            "hint": "",
+        }
+        low = announce.lower()
+        if "устройств" in low and ("макс" in low or "лимит" in low):
+            meta["hint"] = ("Подписка упёрлась в лимит устройств: открой бота подписки, "
+                            "раздел «Устройства», и удали лишние. Либо вставь в поле ниже "
+                            "ID устройства из Happ — тогда FreeConnect будет считаться тем же "
+                            "устройством и не займёт отдельный слот.")
+        return meta
+
     def _fetch_subscription_servers(self, url: str):
-        """Скачивает подписку, перебирая User-Agent; возвращает (text, servers) с
-        максимумом распознанных серверов. Бросает последнюю сетевую ошибку, если
+        """Скачивает подписку, перебирая User-Agent; возвращает (text, servers, meta)
+        с максимумом распознанных серверов. Бросает последнюю сетевую ошибку, если
         ни один UA не ответил."""
         import urllib.request
-        best_text, best = "", []
+        best_text, best, best_meta = "", [], {}
         last_err = None
         for ua in self._SUB_UAGENTS:
             try:
-                req = urllib.request.Request(url, headers={"User-Agent": ua})
+                req = urllib.request.Request(url, headers=self._sub_headers(ua, url))
                 with urllib.request.urlopen(req, timeout=12) as r:  # noqa: S310 (ввод юзера)
                     text = r.read().decode("utf-8", "replace")
+                    meta = self._panel_meta(getattr(r, "headers", None))
             except Exception as e:  # noqa: BLE001
                 last_err = e
                 continue
@@ -981,12 +1088,12 @@ class Api:
             except Exception:  # noqa: BLE001
                 servers = []
             if len(servers) > len(best):
-                best_text, best = text, servers
+                best_text, best, best_meta = text, servers, meta
             if len(best) >= 2:   # достаточно — не гоняем остальные UA
                 break
         if not best_text and last_err is not None:
             raise last_err
-        return best_text, best
+        return best_text, best, best_meta
 
     def vpn_import(self, url: str = "", json_text: str = "") -> dict:
         """Импорт подписки: скачать по ссылке ИЛИ разобрать вставленный JSON.
@@ -995,6 +1102,7 @@ class Api:
         json_text = (json_text or "").strip()
         if json_text:
             text = json_text
+            meta: dict = {}
             try:
                 servers = vpn.parse_servers(text)
             except Exception as e:  # noqa: BLE001
@@ -1002,7 +1110,7 @@ class Api:
                 return {**self.vpn_get_state(), "ok": False, "error": "Не разобрал конфиг — формат не распознан"}
         elif url:
             try:
-                text, servers = self._fetch_subscription_servers(url)
+                text, servers, meta = self._fetch_subscription_servers(url)
             except Exception as e:  # noqa: BLE001
                 _log(f"vpn: скачать подписку не вышло: {e}")
                 return {**self.vpn_get_state(), "ok": False,
@@ -1012,16 +1120,29 @@ class Api:
 
         if not servers:
             return {**self.vpn_get_state(), "ok": False,
-                    "error": "В подписке нет подходящих зарубежных серверов (Hysteria2/VLESS/Trojan)"}
+                    "error": "В подписке нет подходящих зарубежных серверов (VLESS/Trojan/Hysteria2/SS/VMess)"}
 
         self._vpn_servers = servers
         self.cfg["vpn_config"] = text
         if url:
             self.cfg["vpn_sub_url"] = url
+        self.cfg["vpn_panel_announce"] = meta.get("announce", "")
+        self.cfg["vpn_panel_title"] = meta.get("title", "")
+        self.cfg["vpn_panel_provider"] = meta.get("provider", "")
         config.save(self.cfg)
         st = self.vpn_get_state()
         st["ok"] = True
-        st["message"] = f"Импортировано стран: {len(st['servers'])}"
+        st["message"] = f"Импортировано серверов: {len(servers)}"
+        if meta.get("hint"):
+            st["warning"] = meta["hint"]
+        # Заглушку ищем и в сыром тексте, и в именах серверов: JSON от панели может
+        # прийти с экранированной кириллицей (\u0414…), и по тексту её не видно.
+        elif vpn.looks_like_stub(text) or any(vpn.looks_like_stub(s.name) for s in servers):
+            st["warning"] = ("Панель отдала заглушку вместо списка серверов — она не признала "
+                             "клиента. Обычно нужен ID устройства (HWID): либо свой свободный "
+                             "слот в боте подписки, либо ID из Happ (см. поле ниже).")
+        if st.get("warning"):
+            _log("vpn: " + st["warning"])
         return st
 
     def vpn_select(self, country: str = "") -> dict:

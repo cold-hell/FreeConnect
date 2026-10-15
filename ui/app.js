@@ -35,10 +35,16 @@ const MockApi = {
     return {discord:{ok:true,latency:142},youtube:{ok:true,latency:168},voice:{rtt:38}};
   },
   // VPN-для-Discord (мок для отладки дизайна в браузере — реальная логика в бэкенде).
-  _vpn:{servers:[], selected:"auto", enabled:false},
+  _vpn:{servers:[], selected:"auto", enabled:false, count:0, hwid:"", announce:"", panel_title:""},
   async vpn_get_state(){
     return {available:false, imported:this._vpn.servers.length>0, servers:this._vpn.servers,
-            selected:this._vpn.selected, enabled:this._vpn.enabled, sub_url:""};
+            selected:this._vpn.selected, enabled:this._vpn.enabled, sub_url:"",
+            count:this._vpn.count||this._vpn.servers.length, hwid:this._vpn.hwid,
+            announce:this._vpn.announce, panel_title:this._vpn.panel_title};
+  },
+  async vpn_set_hwid(value){
+    this._vpn.hwid=(value||"").trim();
+    return {...await this.vpn_get_state(), ok:true, message:"ID устройства сохранён"};
   },
   async vpn_import(url, json){
     if(!url && !json) return {...await this.vpn_get_state(), ok:false, error:"Вставь ссылку или JSON"};
@@ -51,7 +57,7 @@ const MockApi = {
       {id:"japan",country:"japan",name:"Япония",sub:"Hysteria2 · 14 серв."},
       {id:"__other__",country:"auto",name:"🌍 Другие",sub:"VLESS-Reality · 4 серв."},
     ];
-    return {...await this.vpn_get_state(), ok:true, message:"Импортировано стран: "+this._vpn.servers.length+" (мок)"};
+    return {...await this.vpn_get_state(), ok:true, message:"Импортировано серверов: "+this._vpn.servers.length+" (мок)"};
   },
   async vpn_select(country){ this._vpn.selected=country==="auto"?"auto":country; return {...await this.vpn_get_state(), ok:true}; },
   // Свои сайты (мок для отладки дизайна в браузере).
@@ -694,14 +700,30 @@ function vpnApplyState(st){
   vpnServers=st.servers||[];
   vpnSelectedId=st.selected||"auto";
   if(st.sub_url && $("#vpnSubUrl") && !$("#vpnSubUrl").value.trim()) $("#vpnSubUrl").value=st.sub_url;
+  const hw=$("#vpnHwid");
+  if(hw && !hw.value.trim() && st.hwid) hw.value=st.hwid;
+  vpnShowAnnounce(st.announce||"", st.warning||"");
   $("#optVpnOn").checked=!!st.enabled;
   if(st.enabled) vpnSetStatus("Discord идёт через VPN — включён", true);
   else if(st.imported) vpnSetStatus("Импортировано — выбери сервер и включи", false);
   else vpnSetStatus(st.available===false?"Не настроен (обнови приложение для VPN)":"Не настроен", false);
-  const note = st.imported ? ("Найдено стран: "+vpnServers.length+". Внутри страны берём рабочий сервер сами.")
-                           : "Импортируй подписку, чтобы выбрать страну.";
+  const total=st.count||0;
+  const note = st.imported
+    ? ("Найдено серверов: "+total+" · стран: "+vpnServers.length+". Внутри страны берём рабочий сервер сами.")
+    : "Импортируй подписку, чтобы выбрать страну.";
   vpnRenderServers(note);
   vpnSetBadge(!!st.enabled);
+}
+
+// Сообщение панели подписки (лимит устройств, срок, «обнови подписку») + подсказка.
+function vpnShowAnnounce(text, warn){
+  const box=$("#vpnAnnounce");
+  if(!box) return;
+  const body=[text, warn].filter(s=>s && String(s).trim());
+  if(!body.length){ box.hidden=true; box.textContent=""; box.classList.remove("warn"); return; }
+  box.textContent=body.join("\n\n");
+  box.classList.toggle("warn", !!warn);
+  box.hidden=false;
 }
 async function vpnRefresh(){
   try{ vpnApplyState(await api().vpn_get_state()); }catch(e){}
@@ -715,9 +737,25 @@ $("#vpnImport").onclick=async()=>{
   try{
     const st=await api().vpn_import(url, json);
     if(st && st.ok===false){ toast(st.error||"Не удалось импортировать","warn"); }
-    else if(st){ toast(st.message||"Импортировано","ok"); }
+    else if(st){ toast(st.message||"Импортировано", st.warning?"warn":"ok"); }
     vpnApplyState(st);
+    if(st && st.warning) toast(st.warning,"warn");
   }catch(e){ toast("Ошибка импорта","warn"); }
+  finally{ btn.disabled=false; btn.textContent=old; }
+};
+
+// HWID: свой можно заменить на скопированный из Happ — тогда панель считает
+// FreeConnect тем же устройством и отдаёт тот же список серверов, что и Happ.
+const _vpnHwidSave=$("#vpnHwidSave");
+if(_vpnHwidSave) _vpnHwidSave.onclick=async()=>{
+  const btn=_vpnHwidSave, old=btn.textContent;
+  btn.disabled=true; btn.textContent="Сохраняю…";
+  try{
+    const st=await api().vpn_set_hwid(($("#vpnHwid").value||"").trim());
+    if(st && st.ok===false){ toast(st.error||"Не удалось сохранить ID","warn"); }
+    else if(st){ toast(st.message||"ID устройства сохранён","ok"); }
+    vpnApplyState(st);
+  }catch(e){ toast("Ошибка сохранения ID","warn"); }
   finally{ btn.disabled=false; btn.textContent=old; }
 };
 
