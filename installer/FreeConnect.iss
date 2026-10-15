@@ -3,7 +3,7 @@
 ; Сборка: ISCC.exe installer\FreeConnect.iss  ->  installer\Output\FreeConnect-Setup.exe
 
 #define MyAppName "FreeConnect"
-#define MyAppVersion "0.5.3"
+#define MyAppVersion "0.5.0"
 #define MyAppPublisher "FreeConnect"
 #define MyAppExeName "FreeConnect.exe"
 
@@ -85,3 +85,4 @@ begin
     Exec('taskkill.exe', '/F /IM winws.exe /T', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   end;
 end;
+

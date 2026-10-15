@@ -714,7 +714,7 @@ function vpnApplyState(st){
   else vpnSetStatus(st.available===false?"Не настроен (обнови приложение для VPN)":"Не настроен", false);
   const total=st.count||0;
   const note = st.imported
-    ? ("Найдено серверов: "+total+" · стран: "+vpnServers.length+". Внутри страны берём рабочий сервер сами.")
+    ? ("Серверов: "+total+" · стран: "+vpnServers.length+" — рабочий подберём сами.")
     : "Импортируй подписку, чтобы выбрать страну.";
   vpnRenderServers(note);
   vpnSetBadge(!!st.enabled);

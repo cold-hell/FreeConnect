@@ -529,7 +529,7 @@ body.frameless .splash:not(.hide) ~ .win-controls{opacity:0;pointer-events:none}
 .vpn-announce.warn{background:rgba(255,200,97,.10);border-color:rgba(255,200,97,.30);color:var(--warn)}
 
 /* Кастомный выбор сервера (вместо нативного select) — карточки в стиле выбора стратегий */
-.vpn-server-list{max-height:250px;overflow-y:auto;margin:2px 0 8px;
+.vpn-server-list{max-height:190px;overflow-y:auto;margin:2px 0 8px;
   scrollbar-width:thin;scrollbar-color:var(--accent2) transparent}
 .vpn-server-list::-webkit-scrollbar{width:8px}
 .vpn-server-list::-webkit-scrollbar-thumb{background:linear-gradient(180deg,var(--accent),var(--accent2));border-radius:8px}
@@ -560,9 +560,16 @@ body.frameless .splash:not(.hide) ~ .win-controls{opacity:0;pointer-events:none}
 .vpn-badge.show{display:flex}
 .vpn-badge-dot{flex:none;width:7px;height:7px;border-radius:50%;background:var(--accent2);
   box-shadow:0 0 8px var(--accent2);animation:blink 1.6s ease-in-out infinite}
-/* Главный тумблер всегда прижат к низу окна (sticky), чтобы не терялся под длинным
-   списком серверов; скроллится только содержимое над ним. */
-.vpn-main-toggle{position:sticky;bottom:-16px;z-index:2;margin:6px -20px -16px;
-  padding:14px 20px;background:#0b0f1c;border-top:1px solid var(--panel-brd)}
-/* Окну VPN даём больше высоты — серверов может быть много */
+/* Главный тумблер живёт в подвале окна (см. .vpn-foot), а не поверх содержимого:
+   пока он был sticky с непрозрачным фоном, он накрывал ссылку «Дополнительно и
+   диагностика», и по ней можно было попасть только по торчащим пикселям. */
+#vpnModal .vpn-foot{padding:4px 20px 6px;justify-content:stretch;align-items:center}
+#vpnModal .vpn-foot .toggle-row{flex:1;padding:8px 0}
+/* Окно VPN даём больше высоты — серверов может быть много */
 #vpnModal .modal-card{max-height:88vh}
+/* Окно приложения невысокое (1000×640): поджимаем служебные отступы, чтобы статус,
+   подписка и список серверов влезали без прокрутки, а «Дополнительно и диагностика»
+   оставалось достижимым. */
+#vpnModal .vpn-status{margin-bottom:10px}
+#vpnModal .vpn-section{margin-bottom:12px}
+#vpnModal .settings-note{margin-top:10px;padding:10px 12px}

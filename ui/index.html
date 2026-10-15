@@ -323,13 +323,9 @@
         <div class="settings-note" id="vpnServerNote">Импортируй подписку, чтобы выбрать страну.</div>
       </div>
 
-      <label class="toggle-row vpn-main-toggle">
-        <span>Весь Discord через VPN<small class="toggle-sub">включится и будет держаться, пока не выключишь</small></span>
-        <span class="switch"><input type="checkbox" id="optVpnOn"><span class="slider"></span></span>
-      </label>
-
       <!-- Служебное, нужное редко: ID устройства (подписки с привязкой к устройству) и
-           проверка маршрута. Прячем под ссылку, чтобы не грузить основной экран. -->
+           проверка маршрута. Лежит внутри прокручиваемого тела окна, поэтому тумблер
+           внизу его больше не накрывает. -->
       <button class="link-btn" id="vpnAdvToggle">Дополнительно и диагностика</button>
       <div class="vpn-section" id="vpnAdvBox" hidden>
         <div class="vpn-label">ID устройства (HWID)</div>
@@ -352,6 +348,16 @@
           если возникли сомнения, что VPN заворачивает лишнее.</div>
         <div class="vpn-announce" id="vpnRouteResult" hidden></div>
       </div>
+    </div>
+
+    <!-- Главный тумблер — в ПОДВАЛЕ окна, а не поверх прокручиваемого содержимого:
+         пока он был sticky с непрозрачным фоном, он накрывал ссылку «Дополнительно»,
+         и по ней можно было попасть только по торчащим пикселям. -->
+    <div class="modal-foot vpn-foot">
+      <label class="toggle-row vpn-main-toggle">
+        <span>Весь Discord через VPN<small class="toggle-sub">включится и будет держаться, пока не выключишь</small></span>
+        <span class="switch"><input type="checkbox" id="optVpnOn"><span class="slider"></span></span>
+      </label>
     </div>
   </div>
 </div>
