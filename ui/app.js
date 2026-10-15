@@ -288,6 +288,7 @@ function openScan(deep){
   if(window.Dino) requestAnimationFrame(()=>Dino.start($("#dinoCanvas")));
   foundList.innerHTML=""; progressBar.style.width="0%"; scanCount.textContent="0 / 0";
   scanCurrent.textContent="инициализация…";
+  $("#scanNote").hidden=true; $("#scanNote").textContent="";
   scanTitle.textContent = deep ? "Кую стратегию под тебя" : "Подбираю стратегию под твоего провайдера";
   deepMode=deep; deepFound=0;
   // Радар — для автоподбора, кузница (молот+наковальня) — для глубокого поиска
@@ -329,6 +330,13 @@ window.onSearchProgress=(i,total,name)=>{
   scanCount.textContent=`${i} / ${total}`;
   progressBar.style.width=`${Math.round(i/total*100)}%`;
 };
+// Пометка от бэкенда: причина досрочной остановки перебора и подобные пояснения.
+// Нужна, чтобы «ничего не нашлось» не выглядело как «программа сломалась».
+window.onSearchNote=(msg)=>{
+  const el=$("#scanNote");
+  if(!msg){ el.hidden=true; el.textContent=""; el.classList.remove("warn"); return; }
+  el.hidden=false; el.textContent=msg; el.classList.add("warn");
+};
 window.onSearchResult=(i,total,name,res)=>{
   progressBar.style.width=`${Math.round((i+1)/total*100)}%`;
   scanCount.textContent=`${i+1} / ${total}`;
@@ -350,6 +358,13 @@ window.onSearchDone=(working)=>{
   if(deepMode && window.FX) FX.forgeStop();
   if(refreshMode) scanCurrent.textContent = `Список обновлён: ${working.length}`;
   else scanCurrent.textContent = working.length ? `Найдено рабочих: ${working.length}` : "Рабочих не найдено";
+  // Если ничего не нашлось и бэкенд не сказал причину — подсказываем, что делать.
+  const note=$("#scanNote");
+  if(!working.length && !refreshMode && !note.textContent.trim()){
+    note.hidden=false;
+    note.textContent="Ни один вариант не подошёл. Попробуй другой набор кнопкой «Подобрать автоматически» — генерация стартует от него.";
+    note.classList.remove("warn");
+  }
   progressBar.style.width="100%";
   setTimeout(async()=>{
     overlay.classList.remove("show");

@@ -46,14 +46,25 @@ _KEYMAP = {
 # генератор её не трогал вовсе, поэтому свои стратегии наследовали голос базы
 # один в один: сдохла база — сдохли все. Теперь крутим и голос, а валидатор
 # (tester.check_voice) отсеивает мутации, где голос не поднялся.
+#
+# ВАЖНО про значение ufake: `--dpi-desync-fake-discord`/`-fake-stun` подставляются
+# в UDP-поток Discord, поэтому подменять их надо ТОЛЬКО UDP-фейками того же вида
+# (STUN/QUIC-initial), а не TLS-блобами:
+#   stun.bin (100 б)  — настоящий STUN Binding Request (0x0001 + magic cookie);
+#   stun2.bin (1357 б) — реальный пейлоад Discord (в наборе он же ACTIVE_DISCORD_UDP.bin);
+#   ACTIVE_DISCORD_UDP.bin — то, что стоит в базах по умолчанию.
+# QUIC-initial в голосовой секции смысла не имеет: это другой протокол.
 UDP_KNOBS: dict[str, list[str]] = {
     "urepeats": ["2", "4", "6", "8", "11"],
-    "ufake":    ["{BIN}/quic_initial_dbankcloud_ru.bin",
-                 "{BIN}/quic_initial_www_google_com.bin",
-                 "{BIN}/stun.bin"],
+    "ufake":    ["{BIN}/stun.bin",
+                 "{BIN}/stun2.bin",
+                 "{BIN}/ACTIVE_DISCORD_UDP.bin"],
 }
 # Ключи, на которые ufake ставит один и тот же блоб (discord + stun вместе).
 _UDP_FAKE_KEYS = ("--dpi-desync-fake-discord", "--dpi-desync-fake-stun")
+
+# Причина досрочной остановки последнего глубокого поиска (см. last_stop_reason).
+_last_stop_reason: str = ""
 
 
 def _split_sections(args: list[str]) -> list[list[str]]:
@@ -153,14 +164,119 @@ def pick_bases(primary: Strategy | None) -> list[Strategy]:
     return bases[:5]
 
 
+def rank_bases(primary: Strategy | None, working: list[dict] | None = None) -> list[Strategy]:
+    """Базы для мутаций в порядке перспективности.
+
+    Зачем порядок вообще важен: если перебирать мутации «неудачной» базы, можно
+    выжечь весь бюджет (120 кандидатов ≈ 10 минут) и не найти ничего — именно это
+    выглядит как «генерируется бесконечно и ничего не создаёт». Поэтому первыми
+    идём те базы, которые у ЭТОГО пользователя уже хоть что-то открывали, затем
+    классические (ALT-семейство), и лишь потом всё остальное.
+
+    working — список из состояния приложения (name/discord/youtube/...): в нём есть
+    результаты прошлых подборов, в т.ч. для стратегий, которые сейчас не выбраны.
+    """
+    from .strategies import load_strategies
+    by_name = {s.name: s for s in load_strategies(include_custom=False)}
+    scores: dict[str, float] = {}
+    for w in (working or []):
+        name = w.get("name")
+        if not name or name not in by_name:
+            continue
+        d = (w.get("discord") or 0) + (w.get("youtube") or 0)
+        if w.get("discord_ok"):
+            d += 2
+        scores[name] = max(scores.get(name, 0.0), float(d))
+
+    ordered: list[Strategy] = []
+    if primary:
+        ordered.append(primary)
+
+    # 1) проверенные рабочие базы — от лучшей к худшей
+    for name, _score in sorted(scores.items(), key=lambda kv: kv[1], reverse=True):
+        s = by_name.get(name)
+        if s and all(s.name != b.name for b in ordered):
+            ordered.append(s)
+    # 2) классические базы, если их ещё нет в списке
+    for name in FALLBACK_BASES:
+        s = by_name.get(name)
+        if s and all(s.name != b.name for b in ordered):
+            ordered.append(s)
+    # 3) добор остальными встроенными (лучше проверить хоть что-то, чем упасть)
+    for name in sorted(by_name):
+        s = by_name.get(name)
+        if s and all(s.name != b.name for b in ordered):
+            ordered.append(s)
+    return ordered[:5]
+
+
+def has_voice_section(args: list[str]) -> bool:
+    """Есть ли в стратегии голосовая UDP-секция Discord (её крутят urepeats/ufake)."""
+    return any(_is_voice_udp_section(sec) for sec in _split_sections(args))
+
+
+def _effective(base: Strategy, knobs: dict[str, str]) -> bool:
+    """Изменит ли набор ручек хоть что-то в этой базе?
+
+    Проверяем по секциям, а не «по всей стратегии»: `--dpi-desync-repeats` стоит в
+    голосовой секции и в TCP-секциях, и раньше кандидат считался «изменённым», даже
+    если менялся только голос — при этом TCP-ручки (method/pos/seqovl/...) выставляли
+    значение, которое там уже стояло, то есть мутация была пустой.
+    """
+    sections = _split_sections(base.args)
+    for sec in sections:
+        tcp = _is_tcp_section(sec)
+        voice = _is_voice_udp_section(sec)
+        if not tcp and not voice:
+            continue
+        keys = {t.split("=", 1)[0] for t in sec}
+        for knob, value in knobs.items():
+            if tcp and knob in _KEYMAP:
+                key = _KEYMAP[knob]
+                if knob == "fooling" and value == "":
+                    if key in keys:
+                        return True
+                    continue
+                if _value_in(sec, key) != value:
+                    return True
+            elif voice and knob in UDP_KNOBS:
+                if knob == "urepeats":
+                    if _value_in(sec, "--dpi-desync-repeats") != value:
+                        return True
+                elif knob == "ufake" and any(k in keys for k in _UDP_FAKE_KEYS):
+                    if any(_value_in(sec, k) != value for k in _UDP_FAKE_KEYS):
+                        return True
+    return False
+
+
+def _value_in(section: list[str], key: str) -> str | None:
+    prefix = key + "="
+    for t in section:
+        if t.startswith(prefix):
+            return t.split("=", 1)[1]
+    return None
+
+
 def generate_candidates(bases: list[Strategy], budget: int, seed: int = 0) -> list[Strategy]:
-    """Генерирует кандидатов из НЕСКОЛЬКИХ баз: координатный проход + случайные."""
+    """Кандидаты из нескольких баз в порядке ценности: сперва «по одной ручке».
+
+    Порядок намеренно такой:
+      1) круг №1 — по одному кандидату на каждую ручку каждой базы. Это даёт
+         сравнение баз между собой (какая вообще перспективна) до того, как бюджет
+         уйдёт на случайные комбинации.
+      2) добор одномерных мутаций остальных значений ручек.
+      3) остаток бюджета — случайные комбинации (исследование связок).
+
+    Раньше фаза 3 начиналась внутри каждой базы и съедала больше половины бюджета,
+    а `repeats`/`fooling`/`blob` в одномерный проход вообще не попадали (квота).
+    """
     rng = random.Random(seed or None)
     seen: set[tuple[str, ...]] = set()
     out: list[Strategy] = []
-    per_base = max(6, budget // max(1, len(bases)))
 
     def _add(base: Strategy, knobs: dict[str, str]) -> None:
+        if not _effective(base, knobs):
+            return                            # мутация «в себя» — не тратим прогон
         args = mutate(base.args, knobs)
         key = tuple(args)
         if key in seen:
@@ -169,26 +285,31 @@ def generate_candidates(bases: list[Strategy], budget: int, seed: int = 0) -> li
         out.append(Strategy(id=f"cand_{len(out)}", name=f"Кандидат {len(out) + 1}",
                             source_bat=f"deepsearch(base={base.name})", args=args))
 
-    # Голосовые ручки идут ПЕРВЫМИ в координатном проходе, чтобы точно попасть в
-    # квоту (иначе TCP-ручки её выбирали и голос никогда не менялся).
     all_knobs = {**UDP_KNOBS, **KNOBS}
+
+    # Фаза 1: первый круг по всем базам — по одному значению на ручку.
     for base in bases:
-        start = len(out)
-        # Часть квоты резервируем под случайные комбинации — они крутят TCP и
-        # голос одновременно, гарантируя покрытие голосовых мутаций.
-        rand_quota = max(2, per_base // 2)
-        coord_quota = per_base - rand_quota
-        # 1) координатный проход — по одной ручке за раз (сначала голосовые)
         for knob, values in all_knobs.items():
-            for v in values:
-                if len(out) - start >= coord_quota or len(out) >= budget:
+            if len(out) >= budget:
+                break
+            _add(base, {knob: values[0]})
+
+    # Фаза 2: остальные одномерные мутации.
+    for base in bases:
+        for knob, values in all_knobs.items():
+            for v in values[1:]:
+                if len(out) >= budget:
                     break
                 _add(base, {knob: v})
-        # 2) случайные комбинации до квоты базы (TCP + голос сразу)
-        guard = 0
-        while len(out) - start < per_base and len(out) < budget and guard < per_base * 20:
-            guard += 1
-            _add(base, {k: rng.choice(vs) for k, vs in all_knobs.items()})
+
+    # Фаза 3: исследование связок — оставшийся бюджет.
+    guard = 0
+    while len(out) < budget and guard < budget * 20:
+        guard += 1
+        base = bases[guard % len(bases)] if bases else None
+        if base is None:
+            break
+        _add(base, {k: rng.choice(vs) for k, vs in all_knobs.items()})
 
     return out[:budget]
 
@@ -273,28 +394,35 @@ def deep_search(
     stop_on_all: bool = True,
     max_youtube_only: int = 1,
     min_all: int = 2,
+    working: list[dict] | None = None,
+    dead_run_limit: int = 40,
 ) -> list[StrategyScore]:
     """Перебирает сгенерированных кандидатов, сохраняя рабочих как FreeConnect #N.
 
-    ПРИОРИТЕТ — Discord (голос). Логика сохранения/остановки (по требованию юзера):
+    ПРИОРИТЕТ — Discord (голос). Логика сохранения/остановки:
       - сохраняем кандидата с рабочим Discord (метка Discord/All) всегда;
-      - ютуб-онли сохраняем максимум `max_youtube_only` штук (как запасную), чтобы
-        не засорять список и не «останавливаться» на ютубе;
+      - ютуб-онли сохраняем максимум `max_youtube_only` штук (как запасную);
       - `stop_on_all` — останавливаемся, когда найдено `min_all` кандидатов с ВСЕМИ
-        сервисами (Discord+голос И YouTube) и НАДЁЖНЫМ голосом (voice_conf=high).
-        Даём пользователю не одну, а несколько «All» на выбор (просил друг-тестер);
-      - `stop_after` — доп. лимит по числу сохранённых Discord/All (0 = без лимита).
+        сервисами и НАДЁЖНЫМ голосом (voice_conf=high);
+      - `stop_after` — доп. лимит по числу сохранённых Discord/All (0 = без лимита);
+      - `dead_run_limit` — если столько кандидатов ПОДРЯД не открыли вообще ничего,
+        перебор прекращается: продолжать значит жечь время пользователя впустую
+        («генерируется и ничего не создаёт»). 0 = не останавливаться.
+      - `working` — результаты прошлых подборов: по ним выбираются самые
+        перспективные базы для мутаций (см. rank_bases).
     """
     from . import tester
     svcs = services or list(tester.DEFAULT_TARGETS.keys())
-    bases = pick_bases(base)              # мутируем несколько структур, не одну
+    bases = rank_bases(base, working)     # первыми — базы, которые уже что-то открывали
     candidates = generate_candidates(bases, budget)
     eng = engine or Engine()
     results: list[StrategyScore] = []
     found_discord = 0
     found_all_high = 0
     yt_only_saved = 0
+    dead_run = 0
     total = len(candidates)
+    stopped_early = ""
 
     try:
         for i, cand in enumerate(candidates):
@@ -335,6 +463,18 @@ def deep_search(
             if on_result:
                 on_result(sc)
 
+            # «Мёртвая серия»: ни одного открытого сервиса подряд. Голос в таких
+            # кандидатах уже не проверяется (гейт в tester), поэтому прогон дешёвый,
+            # но бессмысленный — база явно не подходит этому провайдеру.
+            if sc.sites_ok == 0 and not sc.working:
+                dead_run += 1
+            else:
+                dead_run = 0
+            if dead_run_limit and dead_run >= dead_run_limit and len(results) >= len(bases) * len(KNOBS):
+                stopped_early = (f"остановлено: {dead_run} кандидатов подряд без единого "
+                                 f"открытого сервиса — базы не подходят этому провайдеру")
+                break
+
             if stop_on_all and found_all_high >= max(1, min_all):
                 break                       # набрали min_all надёжных All — цель достигнута
             if stop_after and found_discord >= stop_after:
@@ -342,5 +482,17 @@ def deep_search(
     finally:
         eng.stop()
 
+    if stopped_early:
+        global _last_stop_reason
+        _last_stop_reason = stopped_early
     results.sort(key=lambda s: s.score, reverse=True)
     return results
+
+
+def last_stop_reason() -> str:
+    """Почему последний глубокий поиск остановился досрочно ("" = дошёл до конца).
+
+    Нужно интерфейсу: «ничего не нашлось» и «перебор прекращён, потому что ни одна
+    база не открывает даже сайты» — это разные сообщения для пользователя.
+    """
+    return _last_stop_reason

@@ -1730,7 +1730,17 @@ class Api:
         base_name = self.strategy_name or (self.working[0]["name"] if self.working else None)
         base = (self._find_strategy(base_name) if base_name else None) or self._find_strategy("ALT")
         if not base:
-            base = load_strategies()[0]
+            # Набор стратегий мог не приехать (первый запуск без сети / апстрим недоступен).
+            # Тогда мутировать нечего — говорим прямо, а не крутим пустой перебор.
+            try:
+                base = load_strategies()[0]
+            except Exception as e:  # noqa: BLE001
+                _log(f"deep search: нет ни одной стратегии для мутаций ({e})")
+                self._searching = False
+                self._push("onError", "Набор стратегий ещё не загружен — "
+                                      "сначала подключись к интернету и нажми «Подобрать автоматически».")
+                self._push("onSearchDone", self._state()["working"])
+                return
 
         # Точная проверка голоса: вместо STUN-прокси гайдим человека подтвердить голос
         # в его живом Discord (единственный честный ground truth без залогина).
@@ -1772,10 +1782,19 @@ class Api:
                 base, engine=self.engine, budget=120, stop_on_all=True, min_all=5,
                 on_progress=on_progress, on_result=on_result, on_found=on_found,
                 cancel=self._cancel,
+                # Прошлые подборы: по ним выбираем, какие базы мутировать первыми
+                # (своя генерация «под этого пользователя» — и она не должна начинать
+                # с базы, которая у него ничего не открывает).
+                working=list(self.working),
             )
+            reason = deepsearch.last_stop_reason()
             _log(f"=== DEEP SEARCH done: кандидатов={len(results)}, "
-                 f"рабочих={sum(1 for r in results if r.working)} ===")
+                 f"рабочих={sum(1 for r in results if r.working)}"
+                 + (f", причина остановки: {reason}" if reason else "") + " ===")
+            if reason:
+                self._push("onSearchNote", reason)
         except Exception as e:  # noqa: BLE001
+            _log(f"deep search failed: {e}")
             self._push("onError", f"Ошибка глубокого поиска: {e}")
 
         cancelled = self._cancel.is_set()
