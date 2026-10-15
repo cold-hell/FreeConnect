@@ -716,6 +716,8 @@ function vpnApplyState(st){
 }
 
 // Сообщение панели подписки (лимит устройств, срок, «обнови подписку») + подсказка.
+// Если панель жалуется на устройства — сразу раскрываем блок «ID устройства»:
+// без этого подсказка «вставь ID» указывала бы на скрытое поле.
 function vpnShowAnnounce(text, warn){
   const box=$("#vpnAnnounce");
   if(!box) return;
@@ -724,7 +726,18 @@ function vpnShowAnnounce(text, warn){
   box.textContent=body.join("\n\n");
   box.classList.toggle("warn", !!warn);
   box.hidden=false;
+  if(warn){
+    const hb=$("#vpnHwidBox");
+    if(hb) hb.hidden=false;
+  }
 }
+
+// Блок «ID устройства» свёрнут: он нужен только подпискам с привязкой к устройству.
+const _vpnHwidToggle=$("#vpnHwidToggle");
+if(_vpnHwidToggle) _vpnHwidToggle.onclick=()=>{
+  const b=$("#vpnHwidBox");
+  if(b) b.hidden=!b.hidden;
+};
 async function vpnRefresh(){
   try{ vpnApplyState(await api().vpn_get_state()); }catch(e){}
 }

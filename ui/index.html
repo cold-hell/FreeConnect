@@ -323,16 +323,20 @@
         <div class="settings-note" id="vpnServerNote">Импортируй подписку, чтобы выбрать страну.</div>
       </div>
 
-      <div class="vpn-section">
-        <div class="vpn-label">ID устройства (HWID)</div>
+      <!-- ID устройства нужен только подпискам с привязкой к устройству и только когда
+           слоты заняты. Обычному пользователю тут делать нечего: FreeConnect создаёт свой
+           ID сам и отправляет его панели, поэтому блок по умолчанию свёрнут. -->
+      <button class="link-btn" id="vpnHwidToggle">ID устройства — только если в подписке кончились слоты</button>
+      <div class="vpn-section" id="vpnHwidBox" hidden>
         <div class="vpn-row">
-          <input type="text" id="vpnHwid" class="vpn-input" placeholder="свой ID или скопированный из Happ"
+          <input type="text" id="vpnHwid" class="vpn-input" placeholder="заполняется автоматически"
                  autocomplete="off" spellcheck="false">
           <button class="btn small" id="vpnHwidSave">Сохранить</button>
         </div>
-        <div class="settings-note">Панели с привязкой к устройству без этого ID отдают заглушку — один нерабочий
-          сервер. Свой ID создаётся автоматически; чтобы не занимать отдельное устройство, вставь сюда ID из Happ
-          (подписка → «Your HWID» → «Copy HWID»).</div>
+        <div class="settings-note">Обычно вводить сюда ничего не нужно: FreeConnect сам создаёт ID один раз
+          и всегда отправляет панели его. Поле пригодится, если панель написала, что все устройства заняты:
+          можно вставить ID из другого клиента (Happ → <b>Ctrl+R</b> → «Copy HWID»), и FreeConnect будет
+          считаться тем же устройством, не занимая отдельный слот.</div>
       </div>
 
       <label class="toggle-row vpn-main-toggle">
