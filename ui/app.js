@@ -732,15 +732,16 @@ function vpnShowAnnounce(text, warn){
   box.classList.toggle("warn", !!warn);
   box.hidden=false;
   if(warn){
-    const hb=$("#vpnHwidBox");
+    const hb=$("#vpnAdvBox");
     if(hb) hb.hidden=false;
   }
 }
 
-// Блок «ID устройства» свёрнут: он нужен только подпискам с привязкой к устройству.
-const _vpnHwidToggle=$("#vpnHwidToggle");
-if(_vpnHwidToggle) _vpnHwidToggle.onclick=()=>{
-  const b=$("#vpnHwidBox");
+// Блок «Дополнительно и диагностика» (ID устройства + проверка маршрута) свёрнут:
+// в обычной жизни туда ходить незачем.
+const _vpnAdvToggle=$("#vpnAdvToggle");
+if(_vpnAdvToggle) _vpnAdvToggle.onclick=()=>{
+  const b=$("#vpnAdvBox");
   if(b) b.hidden=!b.hidden;
 };
 async function vpnRefresh(){

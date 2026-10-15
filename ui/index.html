@@ -323,11 +323,16 @@
         <div class="settings-note" id="vpnServerNote">Импортируй подписку, чтобы выбрать страну.</div>
       </div>
 
-      <!-- ID устройства нужен только подпискам с привязкой к устройству и только когда
-           слоты заняты. Обычному пользователю тут делать нечего: FreeConnect создаёт свой
-           ID сам и отправляет его панели, поэтому блок по умолчанию свёрнут. -->
-      <button class="link-btn" id="vpnHwidToggle">ID устройства — только если в подписке кончились слоты</button>
-      <div class="vpn-section" id="vpnHwidBox" hidden>
+      <label class="toggle-row vpn-main-toggle">
+        <span>Весь Discord через VPN<small class="toggle-sub">включится и будет держаться, пока не выключишь</small></span>
+        <span class="switch"><input type="checkbox" id="optVpnOn"><span class="slider"></span></span>
+      </label>
+
+      <!-- Служебное, нужное редко: ID устройства (подписки с привязкой к устройству) и
+           проверка маршрута. Прячем под ссылку, чтобы не грузить основной экран. -->
+      <button class="link-btn" id="vpnAdvToggle">Дополнительно и диагностика</button>
+      <div class="vpn-section" id="vpnAdvBox" hidden>
+        <div class="vpn-label">ID устройства (HWID)</div>
         <div class="vpn-row">
           <input type="text" id="vpnHwid" class="vpn-input" placeholder="заполняется автоматически"
                  autocomplete="off" spellcheck="false">
@@ -337,20 +342,14 @@
           и всегда отправляет панели его. Поле пригодится, если панель написала, что все устройства заняты:
           можно вставить ID из другого клиента (Happ → <b>Ctrl+R</b> → «Copy HWID»), и FreeConnect будет
           считаться тем же устройством, не занимая отдельный слот.</div>
-      </div>
 
-      <label class="toggle-row vpn-main-toggle">
-        <span>Весь Discord через VPN<small class="toggle-sub">включится и будет держаться, пока не выключишь</small></span>
-        <span class="switch"><input type="checkbox" id="optVpnOn"><span class="slider"></span></span>
-      </label>
-
-      <div class="vpn-section">
+        <div class="vpn-label" style="margin-top:16px">Маршрут</div>
         <div class="vpn-row">
           <button class="btn small" id="vpnRouteCheck">Проверить маршрут</button>
         </div>
         <div class="settings-note">Покажет, куда реально идёт трафик: «напрямую» — это то, что видят
-          браузер и остальные программы (твой домашний IP), «через VPN» — выход Discord. Так видно,
-          что VPN не заворачивает лишнего.</div>
+          браузер и остальные программы (твой домашний IP), «через VPN» — выход Discord. Нужно, только
+          если возникли сомнения, что VPN заворачивает лишнее.</div>
         <div class="vpn-announce" id="vpnRouteResult" hidden></div>
       </div>
     </div>
