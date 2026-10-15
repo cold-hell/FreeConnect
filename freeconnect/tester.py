@@ -43,6 +43,16 @@ DEFAULT_TARGETS: dict[str, list[tuple[str, str]]] = {
     ],
 }
 
+# Цели-«советники»: их вердикт не влияет на sites_ok, но проверяем их быстро.
+# Зачем: redirector.googlevideo.com не отвечает на TLS ClientHello НИ при рабочем
+# обходе, ни при выключенном (DNS и TCP открываются, ответа нет) — то есть цель
+# не различает рабочую и нерабочую стратегию, зато съедала полный таймаут на
+# КАЖДОМ кандидате. Замерено: test_all(discord+youtube) = 5.09 с из-за неё одной,
+# тогда как все остальные пробы вместе — ~0.3 с, а голос — 0.18 с.
+ADVISORY_TARGETS: set[tuple[str, str]] = {("redirector.googlevideo.com", "/")}
+# Быстрый таймаут для целей-«советников» (с): хост либо ответит сразу, либо нет.
+ADVISORY_TIMEOUT = 1.0
+
 STUN_SERVERS = [
     ("stun.l.google.com", 19302),
     ("stun1.l.google.com", 19302),
@@ -57,6 +67,7 @@ class SiteResult:
     latency_ms: float = -1.0  # время до первого байта ответа
     bytes_read: int = 0
     detail: str = ""
+    advisory: bool = False    # цель-«советник»: показываем, но не влияем на вердикт
 
 
 @dataclass
@@ -84,9 +95,11 @@ class ServiceResult:
 
     @property
     def sites_ok(self) -> bool:
-        # Половина целей (округл. вверх) должна открыться.
-        good = sum(1 for s in self.sites if s.ok)
-        return good >= (len(self.sites) + 1) // 2
+        # Половина РЕШАЮЩИХ целей (округл. вверх) должна открыться. Цели-«советники»
+        # (advisory) в порог не входят: их вердикт показывается, но не решает.
+        decisive = [s for s in self.sites if not s.advisory]
+        good = sum(1 for s in decisive if s.ok)
+        return good >= (len(decisive) + 1) // 2
 
     @property
     def ok(self) -> bool:
@@ -278,7 +291,8 @@ def stun_burst(server: tuple[str, int], count: int, timeout: float,
     return count, rtts
 
 
-def check_voice(attempts: int = 5, timeout: float = 1.6, retries: int = 1) -> ServiceResult:
+def check_voice(attempts: int = 5, timeout: float = 1.6, retries: int = 1,
+                quick: bool = False) -> ServiceResult:
     """Многометричная авто-проверка UDP-пути голоса/демонстрации Discord.
 
     Меряет не только RTT, а связку сигналов (всё в фоне, без участия человека):
@@ -298,6 +312,24 @@ def check_voice(attempts: int = 5, timeout: float = 1.6, retries: int = 1) -> Se
     (напр. ALT9) как «без голоса» и спрятать её от пользователя.
     """
     out = ServiceResult(service="_voice")
+
+    # Быстрый режим (quick): один короткий залп на 1–2 пробы. Нужен для массового
+    # сита кандидатов — отличает «UDP жив» от «UDP мёртв» за ~0.2 с вместо ~0.5–6 с.
+    # Точные метрики (потери/джиттер/большой пакет) в этом режиме не собираются:
+    # для кандидата-сита достаточно ответа «да/нет».
+    if quick:
+        for srv in STUN_SERVERS:
+            _, rtts = stun_burst(srv, count=2, timeout=min(0.6, timeout), pad=0)
+            if rtts:
+                best = min(rtts)
+                out.voice_ok = best <= VOICE_RTT_MAX_MS
+                out.voice_rtt = best
+                out.voice_conf = "low"
+                out.voice_detail = f"быстрая проба: rtt={best}мс"
+                return out
+        out.voice_ok, out.voice_rtt = False, -1.0
+        out.voice_conf, out.voice_detail = "low", "быстрая проба: STUN не ответил"
+        return out
 
     def _measure() -> tuple[tuple[str, int] | None, list[float]]:
         for srv in STUN_SERVERS:
@@ -348,21 +380,45 @@ def test_service(
     timeout: float = 5.0,
     probe_freeze: bool = True,
     check_voice_udp: bool = True,
+    quick_voice: bool = False,
+    skip_voice_if_sites_fail: bool = True,
 ) -> ServiceResult:
     tgts = targets if targets is not None else DEFAULT_TARGETS.get(service, [])
     result = ServiceResult(service=service)
     if not tgts:
         return result
+
+    def probe(t: tuple[str, str]) -> SiteResult:
+        host, path = t
+        # Цели-«советники» проверяем коротким таймаутом: они не решают вердикт, а
+        # полный таймаут на них означал бы, что КАЖДЫЙ кандидат стоит лишние 4 с.
+        if (host, path) in ADVISORY_TARGETS:
+            r = check_site(host, path, timeout=min(ADVISORY_TIMEOUT, timeout),
+                           probe_freeze=probe_freeze)
+            r.advisory = True
+            return r
+        return check_site(host, path, timeout=timeout, probe_freeze=probe_freeze)
+
     # Цели проверяем параллельно — так один прогон занимает ~таймаут, а не сумму.
     with ThreadPoolExecutor(max_workers=len(tgts)) as ex:
-        futures = [
-            ex.submit(check_site, host, path, timeout=timeout, probe_freeze=probe_freeze)
-            for host, path in tgts
-        ]
+        futures = [ex.submit(probe, t) for t in tgts]
         result.sites = [f.result() for f in futures]
     # Для голосовых сервисов дополнительно меряем UDP-путь (многометрично).
-    if check_voice_udp and service in VOICE_SERVICES:
-        vc = check_voice(timeout=min(1.6, timeout))
+    # Гейт: если сайты не открылись, стратегия уже нерабочая (ServiceResult.ok =
+    # sites_ok AND voice_ok) — голосовые пробы на ней бессмысленны и стоят 0.2–6 с
+    # каждая. В переборе таких кандидатов большинство, поэтому гейт экономит больше
+    # всего времени при том же итоговом вердикте.
+    want_voice = check_voice_udp and service in VOICE_SERVICES
+    if want_voice and skip_voice_if_sites_fail and not result.sites_ok:
+        # Стратегия уже нерабочая (ok = sites_ok AND voice_ok), а голосовая проба
+        # стоит 0.2–6 с. Ставим честный False вместо None: голосом этот путь не
+        # считается — и это видно в логе, а не выглядит как «не измеряли».
+        result.voice_ok = False
+        result.voice_conf = ""
+        result.voice_detail = "голос не проверялся: сайты Discord не открылись"
+        return result
+    if want_voice:
+        vc = check_voice(timeout=min(1.6, timeout), quick=quick_voice)
         result.voice_ok = vc.voice_ok
         result.voice_rtt = vc.voice_rtt
         result.voice_loss = vc.voice_loss
@@ -376,13 +432,17 @@ def test_all(
     services: list[str] | None = None,
     timeout: float = 5.0,
     probe_freeze: bool = True,
+    quick_voice: bool = False,
+    skip_voice_if_sites_fail: bool = True,
 ) -> list[ServiceResult]:
     svcs = services or list(DEFAULT_TARGETS.keys())
     # Сервисы проверяем параллельно (один winws обслуживает оба) — прогон
     # занимает ~таймаут самого долгого, а не сумму. Порядок сохраняем.
     with ThreadPoolExecutor(max_workers=max(1, len(svcs))) as ex:
         futures = [
-            ex.submit(test_service, s, timeout=timeout, probe_freeze=probe_freeze)
+            ex.submit(test_service, s, timeout=timeout, probe_freeze=probe_freeze,
+                      quick_voice=quick_voice,
+                      skip_voice_if_sites_fail=skip_voice_if_sites_fail)
             for s in svcs
         ]
         return [f.result() for f in futures]
