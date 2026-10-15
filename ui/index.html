@@ -343,6 +343,16 @@
         <span>Весь Discord через VPN<small class="toggle-sub">включится и будет держаться, пока не выключишь</small></span>
         <span class="switch"><input type="checkbox" id="optVpnOn"><span class="slider"></span></span>
       </label>
+
+      <div class="vpn-section">
+        <div class="vpn-row">
+          <button class="btn small" id="vpnRouteCheck">Проверить маршрут</button>
+        </div>
+        <div class="settings-note">Покажет, куда реально идёт трафик: «напрямую» — это то, что видят
+          браузер и остальные программы (твой домашний IP), «через VPN» — выход Discord. Так видно,
+          что VPN не заворачивает лишнего.</div>
+        <div class="vpn-announce" id="vpnRouteResult" hidden></div>
+      </div>
     </div>
   </div>
 </div>

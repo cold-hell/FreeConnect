@@ -268,6 +268,7 @@ class Api:
         self._vpn_probe = SingBox(log=_log, name="singbox-probe", kill_others=False)
         self._vpn_cancel = threading.Event()   # «выключили, пока шло подключение»
         self._vpn_connecting = False
+        self._vpn_winner = None                # сервер, на котором реально стоит туннель
         self._vpn_servers: list = []
         try:
             cached = self.cfg.get("vpn_config", "")
@@ -1172,6 +1173,7 @@ class Api:
                     engine.stop()
                 except Exception as e:  # noqa: BLE001
                     _log(f"vpn stop: {e}")
+            self._vpn_winner = None
             self.cfg["vpn_enabled"] = False
             config.save(self.cfg)
             self._push("onVpnState", False)
@@ -1196,6 +1198,52 @@ class Api:
         if idx == 0:
             return self._vpn_probe
         return SingBox(log=_log, name=f"singbox-probe{idx}", kill_others=False)
+
+    def vpn_check_route(self) -> dict:
+        """Показать ЧЕЛОВЕКУ, куда реально идёт трафик (а не просить верить на слово).
+
+        Меряем «кто мы для внешнего мира» двумя путями:
+        - напрямую, как это делает браузер (наш процесс — НЕ Discord): должен быть
+          домашний IP пользователя;
+        - через SOCKS-пробник к тому же VPN-серверу, что стоит в туннеле: IP страны VPN.
+
+        Если первый пункт показывает страну VPN — маршрутизация сломана, и это видно
+        сразу, без догадок."""
+        if not self.singbox.is_running():
+            return {"ok": False, "error": "Сначала включи «Весь Discord через VPN»"}
+        out: dict = {"ok": True, "direct": None, "vpn": None}
+        try:
+            d = vpn.ip_info()
+            d["country_ru"] = vpn.country_ru(d.get("country_code", ""), d.get("country", ""))
+            out["direct"] = d
+        except Exception as e:  # noqa: BLE001
+            _log(f"vpn route-check: прямой замер не вышел — {e}")
+            out["direct_error"] = str(e)
+
+        winner = self._vpn_winner
+        if winner is None:
+            out["vpn_error"] = "не помню выбранный сервер — переподключись"
+        else:
+            port = vpn.free_local_port()
+            engine = self._vpn_probe_engine(0)
+            try:
+                engine.start(vpn.build_probe_config(winner, port), settle=1.0)
+                v = vpn.ip_info(socks_port=port)
+                v["country_ru"] = vpn.country_ru(v.get("country_code", ""), v.get("country", ""))
+                out["vpn"] = v
+            except Exception as e:  # noqa: BLE001
+                _log(f"vpn route-check: замер через туннель не вышел — {e}")
+                out["vpn_error"] = str(e)
+            finally:
+                try:
+                    engine.stop()
+                except Exception:  # noqa: BLE001
+                    pass
+        d_ip = (out.get("direct") or {}).get("ip")
+        v_ip = (out.get("vpn") or {}).get("ip")
+        out["same"] = bool(d_ip and v_ip and d_ip == v_ip)
+        _log(f"vpn route-check: напрямую={d_ip} через VPN={v_ip} same={out['same']}")
+        return out
 
     def _vpn_probe_server(self, cand, idx: int = 0) -> bool:
         """Проверка ОДНОГО сервера без TUN: поднимаем лёгкий socks-конфиг и смотрим,
@@ -1298,6 +1346,7 @@ class Api:
 
             self.cfg["vpn_enabled"] = True
             config.save(self.cfg)
+            self._vpn_winner = winner
             ok = True
             message = f"Discord идёт через VPN: {self._vpn_title(winner)}"
             _log(f"vpn: подключено — {self._vpn_title(winner)}")

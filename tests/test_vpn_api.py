@@ -66,6 +66,7 @@ def _api(has_binary=True, cfg=None):
     api._vpn_probe_engine = lambda idx: api._vpn_probe
     api._vpn_cancel = threading.Event()
     api._vpn_connecting = False
+    api._vpn_winner = None
     api._vpn_servers = []
     api._events = []
     api._events_lock = threading.Lock()
@@ -477,6 +478,75 @@ class TestSubscriptionClientIdentity(unittest.TestCase):
         st = api.vpn_import(url="https://sub.example/abc")
         self.assertEqual(len(st["servers"]), 2)
         self.assertEqual(calls[0], "Streisand")
+
+
+class TestRouteCheck(unittest.TestCase):
+    """«Проверить маршрут»: показать, что VPN заворачивает только Discord.
+
+    Проверка меряет внешний IP двумя путями — напрямую (как браузер) и через туннель.
+    Пользователь видит оба числа, и спорить не о чем."""
+
+    def setUp(self):
+        self._orig_save = fcapp.config.save
+        fcapp.config.save = lambda c: None
+        self._orig_info = vpn.ip_info
+        self._orig_probe_cfg = vpn.build_probe_config
+        # Как и в TestVpnApi: без сети все серверы «живы», туннель «проводит трафик».
+        self._orig_probe = vpn.probe_server
+        self._orig_tunnel = vpn.tunnel_works
+        vpn.probe_server = lambda s, timeout=2.0: (True, 10.0)
+        vpn.tunnel_works = lambda port, **kw: True
+
+    def tearDown(self):
+        fcapp.config.save = self._orig_save
+        vpn.ip_info = self._orig_info
+        vpn.build_probe_config = self._orig_probe_cfg
+        vpn.probe_server = self._orig_probe
+        vpn.tunnel_works = self._orig_tunnel
+
+    def test_requires_running_tunnel(self):
+        api = _api()
+        r = api.vpn_check_route()
+        self.assertFalse(r["ok"])
+        self.assertIn("Сначала включи", r["error"])
+
+    def test_reports_both_paths(self):
+        api = _api()
+        api.vpn_import(json_text=_profiles())
+        _connect(api)                        # туннель «поднят» (фейковый движок)
+        self.assertIsNotNone(api._vpn_winner)
+        seen = []
+
+        def fake_info(socks_port=None, timeout=10.0):
+            seen.append(socks_port)
+            if socks_port:
+                return {"ip": "185.10.20.30", "country": "Netherlands",
+                        "country_code": "NL", "city": "Amsterdam"}
+            return {"ip": "152.89.133.38", "country": "Russian Federation",
+                    "country_code": "RU", "city": "St Petersburg"}
+
+        vpn.ip_info = fake_info
+        r = api.vpn_check_route()
+        self.assertTrue(r["ok"])
+        self.assertEqual(r["direct"]["ip"], "152.89.133.38")
+        self.assertEqual(r["direct"]["country_ru"], "Россия")
+        self.assertEqual(r["vpn"]["ip"], "185.10.20.30")
+        self.assertEqual(r["vpn"]["country_ru"], "Нидерланды")
+        self.assertFalse(r["same"])
+        self.assertEqual(seen, [None, seen[1]])          # прямой замер и замер через SOCKS
+        self.assertTrue(seen[1], "замер через VPN должен идти через локальный SOCKS")
+        self.assertFalse(api._vpn_probe._running, "пробник обязан быть остановлен")
+
+    def test_detects_broken_routing(self):
+        """Если оба пути дают ОДИН IP — VPN не применяется, и это надо сказать прямо."""
+        api = _api()
+        api.vpn_import(json_text=_profiles())
+        _connect(api)
+        vpn.ip_info = lambda socks_port=None, timeout=10.0: {
+            "ip": "152.89.133.38", "country": "Russian Federation",
+            "country_code": "RU", "city": "St Petersburg"}
+        r = api.vpn_check_route()
+        self.assertTrue(r["same"])
 
 
 if __name__ == "__main__":

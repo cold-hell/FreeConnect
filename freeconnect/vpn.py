@@ -742,6 +742,144 @@ def free_local_port() -> int:
         s.close()
 
 
+# ---- «Кто мы для внешнего мира»: доказательство, что VPN только для Discord ----
+# Пользователь вправе не верить на слово. Проверка берёт IP+страну двумя путями:
+# 1) напрямую (обычный процесс, как браузер) — должен быть ЕГО домашний IP;
+# 2) через SOCKS нашего туннеля — IP страны VPN.
+# Если пункт 1 показывает страну VPN, значит маршрутизация сломана, и это видно сразу.
+
+IP_INFO_HOST = "ipwho.is"
+
+
+class _ChunkedReader:
+    """Разбор chunked-ответа (нам нужен только JSON-хвост, но лучше без мусора)."""
+
+    @staticmethod
+    def decode(body: bytes) -> bytes:
+        out, pos = b"", 0
+        try:
+            while pos < len(body):
+                nl = body.index(b"\r\n", pos)
+                size = int(body[pos:nl].split(b";")[0], 16)
+                pos = nl + 2
+                if size == 0:
+                    break
+                out += body[pos:pos + size]
+                pos += size + 2
+            return out or body
+        except Exception:  # noqa: BLE001
+            return body
+
+
+def socks_connect_host(socks_port: int, host: str, port: int, timeout: float):
+    """SOCKS5 CONNECT по ИМЕНИ (ATYP=domain) — чтобы TLS-сертификат проверялся по имени."""
+    sk = socket.create_connection(("127.0.0.1", int(socks_port)), timeout=timeout)
+    try:
+        sk.settimeout(timeout)
+        sk.sendall(b"\x05\x01\x00")                     # greeting: без авторизации
+        if sk.recv(2) != b"\x05\x00":
+            raise OSError("socks: greeting rejected")
+        hb = host.encode("idna")
+        sk.sendall(b"\x05\x01\x00\x03" + bytes([len(hb)]) + hb
+                   + int(port).to_bytes(2, "big"))
+        rep = sk.recv(4)
+        if len(rep) < 2 or rep[0] != 0x05 or rep[1] != 0x00:
+            raise OSError(f"socks: connect rejected (code 0x{rep[1]:02x})"
+                          if len(rep) > 1 else "socks: short reply")
+        atyp = rep[3] if len(rep) > 3 else 0x01
+        if atyp == 0x01:
+            sk.recv(4 + 2)
+        elif atyp == 0x03:
+            sk.recv(sk.recv(1)[0] + 2)
+        elif atyp == 0x04:
+            sk.recv(16 + 2)
+        return sk
+    except Exception:
+        try:
+            sk.close()
+        except OSError:
+            pass
+        raise
+
+
+def _http_get_body(socks_port: int | None, host: str, path: str = "/",
+                   timeout: float = 10.0) -> bytes:
+    """GET по HTTPS напрямую либо через SOCKS-вход sing-box. HTTP/1.0 — без chunked."""
+    req = (f"GET {path} HTTP/1.0\r\nHost: {host}\r\nUser-Agent: FreeConnect\r\n"
+           f"Accept: application/json\r\nAccept-Encoding: identity\r\n\r\n").encode()
+    if socks_port:
+        sk = socks_connect_host(socks_port, host, 443, timeout)
+        try:
+            ctx = ssl.create_default_context()
+            with ctx.wrap_socket(sk, server_hostname=host) as tls:
+                tls.settimeout(timeout)
+                tls.sendall(req)
+                buf = b""
+                while True:
+                    chunk = tls.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+        except Exception:
+            try:
+                sk.close()
+            except OSError:
+                pass
+            raise
+    else:
+        import urllib.request
+        rq = urllib.request.Request(f"https://{host}{path}",
+                                    headers={"User-Agent": "FreeConnect",
+                                             "Accept": "application/json"})
+        with urllib.request.urlopen(rq, timeout=timeout) as r:  # noqa: S310
+            return r.read()      # urllib уже отдал только тело (заголовки отделены)
+
+    head, _, body = buf.partition(b"\r\n\r\n")
+    if b"chunked" in head.lower():
+        body = _ChunkedReader.decode(body)
+    return body
+
+
+def ip_info(socks_port: int | None = None, timeout: float = 10.0) -> dict:
+    """{ip, country, country_code, city} — напрямую или через туннель.
+
+    Через `socks_port` запрос уходит ВНУТРЬ VPN (выход VPN-сервера); без него — как
+    обычный процесс (браузер), то есть напрямую через домашний интернет."""
+    body = _http_get_body(socks_port, IP_INFO_HOST, "/", timeout)
+    text = body.decode("utf-8", "replace")
+    try:
+        data = json.loads(text)
+    except ValueError:
+        # Ответ может быть обёрнут (chunked-остатки, отладочный префикс) — берём JSON-хвост.
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            raise ValueError("не разобрал ответ сервиса определения IP") from None
+        data = json.loads(text[start:end + 1])
+    if not data.get("ip"):
+        raise ValueError(data.get("message") or "сервис не вернул IP")
+    return {"ip": str(data.get("ip")), "country": str(data.get("country") or ""),
+            "country_code": str(data.get("country_code") or ""),
+            "city": str(data.get("city") or "")}
+
+
+COUNTRY_RU_BY_CODE = {
+    "RU": "Россия", "NL": "Нидерланды", "DE": "Германия", "LV": "Латвия", "FI": "Финляндия",
+    "SE": "Швеция", "PL": "Польша", "FR": "Франция", "IT": "Италия", "ES": "Испания",
+    "GB": "Великобритания", "US": "США", "CA": "Канада", "CH": "Швейцария", "AT": "Австрия",
+    "EE": "Эстония", "LT": "Литва", "TR": "Турция", "JP": "Япония", "SG": "Сингапур",
+    "HK": "Гонконг", "KR": "Корея", "IN": "Индия", "AE": "ОАЭ", "KZ": "Казахстан",
+    "UA": "Украина", "BY": "Беларусь", "GE": "Грузия", "AM": "Армения", "MD": "Молдова",
+    "RO": "Румыния", "CZ": "Чехия", "HU": "Венгрия", "BG": "Болгария", "RS": "Сербия",
+    "NO": "Норвегия", "DK": "Дания", "IE": "Ирландия", "BE": "Бельгия", "PT": "Португалия",
+}
+
+
+def country_ru(code: str, fallback: str = "") -> str:
+    """Код страны -> читаемое название по-русски (иначе то, что вернул сервис)."""
+    return COUNTRY_RU_BY_CODE.get((code or "").upper()) or fallback or (code or "")
+
+
+
 # Куда стучимся, проверяя туннель. ТОЛЬКО IP и НИКАКИХ доменов: резолв имени внутри
 # sing-box уходил бы в DNS, а он при поднятом TUN легко ломается — из-за этого проверка
 # падала ДАЖЕ НА РАБОЧИХ серверах («поднялся, но трафик не идёт» на всех подряд).
@@ -950,7 +1088,8 @@ def _server_to_outbound(s: Server, tag: str = "vpn") -> dict:
 
 
 def build_singbox_config(server: Server, tun_name: str = "freeconn0",
-                         probe_port: int | None = None) -> dict:
+                         probe_port: int | None = None,
+                         log_level: str = "warn") -> dict:
     """Полный конфиг sing-box: TUN + маршрут «процессы Discord -> VPN, остальное ->
     direct». Всё, что direct, дальше идёт через наш winws-десинк как обычно.
 
@@ -970,17 +1109,28 @@ def build_singbox_config(server: Server, tun_name: str = "freeconn0",
         "address": ["172.19.0.1/30"], "auto_route": True, "strict_route": False,
         "stack": "system",
     }]
-    rules: list[dict] = [
-        # Весь трафик процессов Discord — в VPN.
-        {"process_name": DISCORD_PROCESSES, "outbound": "vpn"},
-    ]
+    rules: list[dict] = []
     if probe_port:
         inbounds.append({"type": "socks", "tag": "probe-in",
                          "listen": "127.0.0.1", "listen_port": int(probe_port)})
-        rules.insert(0, {"inbound": ["probe-in"], "outbound": "vpn"})
+        rules.append({"inbound": ["probe-in"], "outbound": "vpn"})
+    # Определяем домен по первым байтам соединения (нужно правилу ниже).
+    rules.append({"action": "sniff"})
+    # Локальная сеть и приватные адреса — ВСЕГДА напрямую, даже для Discord.
+    # Раньше этот трафик попадал в правило Discord и уходил в VPN: голосовой движок
+    # Discord долбит адреса собственной TUN-подсети (172.19.0.2:10xxx) и получал на
+    # каждый такой «стук» попытку соединения через зарубежный сервер.
+    rules.append({"ip_is_private": True, "outbound": "direct"})
+    # Весь трафик процессов Discord — в VPN.
+    rules.append({"process_name": DISCORD_PROCESSES, "outbound": "vpn"})
+    # Плюс сами домены Discord: их в РФ блокируют по имени, а соединение может
+    # открывать не Discord.exe (оверлей, веб-версия), и по IP такое не отличить.
+    rules.append({"domain_suffix": ["discord.com", "discord.gg", "discordapp.com",
+                                    "discordapp.net", "discord.media"],
+                  "outbound": "vpn"})
 
     return {
-        "log": {"level": "warn"},
+        "log": {"level": log_level},
         # DNS обязателен: с поднятым TUN системный резолв уходит в маршруты sing-box,
         # и без явных правил имена Discord не резолвились вовсе. Домены Discord
         # резолвим ВНУТРИ туннеля (не утекают и не зависят от провайдера), остальное —

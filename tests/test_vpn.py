@@ -630,13 +630,46 @@ class TestSingboxConfig(unittest.TestCase):
 
     def test_routes_only_discord_to_vpn(self):
         cfg = vpn.build_singbox_config(self._de())
-        rule = cfg["route"]["rules"][0]
-        self.assertEqual(rule["outbound"], "vpn")
-        self.assertIn("Discord.exe", rule["process_name"])
+        rules = cfg["route"]["rules"]
+        # Сниффер (нужен правилу доменов) идёт первым и ничего не маршрутизирует.
+        self.assertEqual(rules[0].get("action"), "sniff")
+        self.assertNotIn("outbound", rules[0])
+        # Приватные адреса (в т.ч. подсеть TUN) — ВСЕГДА мимо VPN: голосовой движок
+        # Discord стучится в 172.19.0.2:10xxx, и раньше это уходило через зарубежный
+        # сервер. Проверяем, что правило стоит ВЫШЕ правила Discord.
+        priv = next(i for i, r in enumerate(rules) if r.get("ip_is_private"))
+        disc = next(i for i, r in enumerate(rules) if "Discord.exe" in (r.get("process_name") or []))
+        self.assertLess(priv, disc)
+        self.assertEqual(rules[priv]["outbound"], "direct")
+        self.assertEqual(rules[disc]["outbound"], "vpn")
         self.assertEqual(cfg["route"]["final"], "direct")   # остальное — мимо VPN
         tags = {o["tag"] for o in cfg["outbounds"]}
         self.assertEqual(tags, {"vpn", "direct"})
         self.assertEqual(cfg["inbounds"][0]["type"], "tun")
+
+    def test_discord_domains_go_to_vpn(self):
+        """Discord в РФ блокируют и по имени: соединение может открыть не Discord.exe."""
+        cfg = vpn.build_singbox_config(self._de())
+        dom = next(r for r in cfg["route"]["rules"] if r.get("domain_suffix"))
+        self.assertIn("discord.com", dom["domain_suffix"])
+        self.assertEqual(dom["outbound"], "vpn")
+
+    def test_probe_inbound_rule_comes_first(self):
+        cfg = vpn.build_singbox_config(self._de(), probe_port=18080)
+        rules = cfg["route"]["rules"]
+        self.assertEqual(rules[0], {"inbound": ["probe-in"], "outbound": "vpn"})
+        socks = [i for i in cfg["inbounds"] if i["type"] == "socks"]
+        self.assertEqual(socks[0]["listen"], "127.0.0.1")
+        self.assertEqual(socks[0]["listen_port"], 18080)
+
+    def test_log_level_is_configurable(self):
+        self.assertEqual(vpn.build_singbox_config(self._de())["log"]["level"], "warn")
+        self.assertEqual(vpn.build_singbox_config(self._de(), log_level="debug")["log"]["level"],
+                         "debug")
+
+    def test_country_ru_names(self):
+        self.assertEqual(vpn.country_ru("NL", "Netherlands"), "Нидерланды")
+        self.assertEqual(vpn.country_ru("ZZ", "Freedonia"), "Freedonia")   # незнакомый — как есть
 
     def test_hysteria2_outbound(self):
         ob = vpn._server_to_outbound(self._de())

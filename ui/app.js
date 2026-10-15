@@ -46,6 +46,11 @@ const MockApi = {
     this._vpn.hwid=(value||"").trim();
     return {...await this.vpn_get_state(), ok:true, message:"ID устройства сохранён"};
   },
+  async vpn_check_route(){
+    return {ok:true, same:false,
+            direct:{ip:"152.89.133.38", country:"Россия", country_ru:"Россия"},
+            vpn:{ip:"185.10.20.30", country:"Нидерланды", country_ru:"Нидерланды"}};
+  },
   async vpn_import(url, json){
     if(!url && !json) return {...await this.vpn_get_state(), ok:false, error:"Вставь ссылку или JSON"};
     this._vpn.servers=[
@@ -769,6 +774,40 @@ if(_vpnHwidSave) _vpnHwidSave.onclick=async()=>{
     else if(st){ toast(st.message||"ID устройства сохранён","ok"); }
     vpnApplyState(st);
   }catch(e){ toast("Ошибка сохранения ID","warn"); }
+  finally{ btn.disabled=false; btn.textContent=old; }
+};
+
+// Проверка маршрута: пользователь сам видит два IP — «напрямую» (как браузер) и
+// «через VPN» (как Discord). Так видно, что лишнее через VPN не уходит.
+const _vpnRouteBtn=$("#vpnRouteCheck");
+if(_vpnRouteBtn) _vpnRouteBtn.onclick=async()=>{
+  const box=$("#vpnRouteResult"), btn=_vpnRouteBtn, old=btn.textContent;
+  btn.disabled=true; btn.textContent="Проверяю…";
+  const show=(text,warn)=>{ if(!box) return; box.textContent=text; box.classList.toggle("warn",!!warn); box.hidden=false; };
+  show("Смотрю, куда идёт трафик…", false);
+  try{
+    const r=await api().vpn_check_route();
+    if(!r || r.ok===false){ show(r && r.error ? r.error : "Не удалось проверить", true); return; }
+    const line=(label,obj,err)=>{
+      if(obj && obj.ip) return `${label}: ${obj.ip} · ${obj.country_ru||obj.country||"?"}`;
+      return `${label}: не удалось (${err||"нет ответа"})`;
+    };
+    const parts=[
+      line("Напрямую (браузер и прочее)", r.direct, r.direct_error),
+      line("Через VPN (Discord)", r.vpn, r.vpn_error),
+    ];
+    let verdict, warn=false;
+    if(r.same){
+      verdict="⚠ Оба пути дают один и тот же IP — похоже, VPN сейчас не применяется вовсе.";
+      warn=true;
+    }else if(r.direct && r.vpn){
+      verdict="Маршрут верный: остальные программы идут напрямую, через VPN — только Discord.";
+    }else{
+      verdict="Часть замеров не удалась — смотри строки выше.";
+      warn=true;
+    }
+    show(parts.join("\n")+"\n\n"+verdict, warn);
+  }catch(e){ show("Ошибка проверки маршрута", true); }
   finally{ btn.disabled=false; btn.textContent=old; }
 };
 
