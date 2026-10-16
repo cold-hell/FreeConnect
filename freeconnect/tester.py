@@ -20,6 +20,10 @@ from dataclasses import dataclass, field
 
 # Порог «докачки», выше которого считаем, что заморозки 16-20 КБ нет.
 FREEZE_PROBE_BYTES = 24_000
+# Лимит на TCP-коннект в лестнице проверок (см. check_site). Живой сервер отвечает
+# за единицы миллисекунд; если DPI не пускает, ждать дольше бессмысленно — именно
+# эти ожидания и составляли почти всё время перебора.
+TCP_PROBE_TIMEOUT = 1.0
 # Сервисы, у которых важен голос (UDP). Для них скоринг требует живого UDP-пути.
 VOICE_SERVICES = {"discord"}
 # Выше этого RTT (мс) считаем UDP-путь задушенным (голос будет рваться).
@@ -121,29 +125,56 @@ def check_site(
     timeout: float = 5.0,
     probe_freeze: bool = True,
 ) -> SiteResult:
-    """Проверяет доступность сайта через TLS + чтение части ответа."""
+    """Проверяет доступность сайта лестницей: TCP -> TLS -> докачка тела.
+
+    Лестница нужна из-за главного расхода времени в переборе. Замерено на живой
+    машине: когда DPI режет соединение, проба возвращается не «медленно», а ровно
+    по лимиту — 5.05 с на каждой цели при timeout=5. Именно поэтому проход по 22
+    наборам занимал ~110 с почти целиком из ожиданий, а не из работы.
+
+    TCP-коннект (один SYN/ACK) отсекает эти ожидания за долю лимита: если SYNT не
+    прошёл за `tcp_timeout`, дальше TLS ждать бессмысленно — стратегия не работает.
+    Если TCP открылся, идём дальше полноценным TLS с обычным лимитом (иначе мы бы
+    приняли подменённый/заглушенный коннект за рабочий обход).
+    """
     res = SiteResult(host=host)
+    t0 = time.perf_counter()
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE  # нас интересует проходимость, не валидность серта
 
-    t0 = time.perf_counter()
-    sock = None
+    # --- шаг 1: TCP. Короткий лимит: живой сервер отвечает за единицы миллисекунд.
+    tcp_timeout = min(timeout, TCP_PROBE_TIMEOUT)
     try:
-        raw = socket.create_connection((host, port), timeout=timeout)
-        raw.settimeout(timeout)
-        sock = ctx.wrap_socket(raw, server_hostname=host)
+        raw = socket.create_connection((host, port), timeout=tcp_timeout)
     except socket.gaierror:
         res.status = "DNS"
         res.detail = "не резолвится DNS"
         return res
+    except socket.timeout:
+        res.status = "TIMEOUT"
+        res.detail = f"TCP не открылся за {tcp_timeout:.1f}с"
+        return res
+    except (ConnectionResetError, OSError) as e:
+        res.status = "RST"
+        res.detail = f"TCP сброшен: {str(e)[:90]}"
+        return res
+
+    # --- шаг 2: TLS-рукопожатие (здесь и работает обход).
+    # При активной фильтрации проба возвращается ровно по лимиту, поэтому лимит
+    # выбирает вызывающий: на СИТЕ он короткий (см. screen_timeout в test_service),
+    # на точной оценке выживших — полный. Здесь просто уважаем переданный лимит.
+    raw.settimeout(timeout)
+    sock = None
+    try:
+        sock = ctx.wrap_socket(raw, server_hostname=host)
     except (ConnectionResetError, ssl.SSLError) as e:
         res.status = "RST"
-        res.detail = str(e)[:120]
+        res.detail = f"TLS сброшен: {str(e)[:90]}"
         return res
     except socket.timeout:
         res.status = "TIMEOUT"
-        res.detail = "таймаут при подключении/хендшейке"
+        res.detail = f"таймаут на TLS-рукопожатии за {timeout:.1f}с"
         return res
     except OSError as e:
         res.status = "ERR"
@@ -291,7 +322,7 @@ def stun_burst(server: tuple[str, int], count: int, timeout: float,
     return count, rtts
 
 
-def check_voice(attempts: int = 5, timeout: float = 1.6, retries: int = 1,
+def check_voice(attempts: int = 5, timeout: float = 1.6, retries: int = 0,
                 quick: bool = False) -> ServiceResult:
     """Многометричная авто-проверка UDP-пути голоса/демонстрации Discord.
 
@@ -307,9 +338,10 @@ def check_voice(attempts: int = 5, timeout: float = 1.6, retries: int = 1,
     Но многометрика ловит большинство случаев «STUN пингуется, а медиа мёртвая»
     (высокие потери / джиттер / провал больших пакетов). Пороги калибруются по логам.
 
-    retries — при «мёртвом»/потерянном первом замере делаем ещё попытку и берём
-    лучший результат: разовая сетевая осечка не должна пометить рабочую стратегию
-    (напр. ALT9) как «без голоса» и спрятать её от пользователя.
+    retries по умолчанию 0. Раньше здесь был повтор с окнами по 1.6 с на двух
+    серверах — при задушенном UDP это давало ~6.5 с на КАЖДОГО кандидата перебора.
+    Разовый промах по-прежнему не считаем приговором: пробуем оба STUN-сервера, а
+    повтор включается только там, где он реально нужен (пограничные метрики).
     """
     out = ServiceResult(service="_voice")
 
@@ -339,7 +371,16 @@ def check_voice(attempts: int = 5, timeout: float = 1.6, retries: int = 1,
         return None, []
 
     # Берём первый STUN-сервер, который вообще отвечает на мелкие пробы.
-    used, small_rtts = _measure()
+    # Первое окно — короткое: на здоровом пути ответ приходит за ~50 мс, а на
+    # задушенном UDP мы иначе платим полное окно за каждого кандидата (замерено:
+    # ~6.8 с на кандидата из-за окна 1.6 с на двух серверах с повтором).
+    first_timeout = min(0.8, timeout)
+    used, small_rtts = None, []
+    for srv in STUN_SERVERS:
+        _, rtts = stun_burst(srv, count=attempts, timeout=first_timeout, pad=0)
+        if rtts:
+            used, small_rtts = srv, rtts
+            break
     tries = 0
     while tries < retries and (
         not small_rtts or (1.0 - len(small_rtts) / max(1, attempts)) > VOICE_LOSS_MAX
@@ -382,22 +423,31 @@ def test_service(
     check_voice_udp: bool = True,
     quick_voice: bool = False,
     skip_voice_if_sites_fail: bool = True,
+    screen_timeout: float | None = None,
 ) -> ServiceResult:
     tgts = targets if targets is not None else DEFAULT_TARGETS.get(service, [])
     result = ServiceResult(service=service)
     if not tgts:
         return result
 
+    # screen_timeout — короткий лимит для СИТА (первый проход перебора). Смысл: при
+    # активной фильтрации провайдера проба возвращается не «медленно», а ровно по
+    # лимиту (замерено: 5.05 с на каждой цели), поэтому длинный таймаут на сите
+    # означает «каждый кандидат стоит 5 секунд». Отвечающий сервер укладывается в
+    # 0.2–0.3 с, поэтому на сите хватает короткого лимита, а точную оценку выжившие
+    # получают на втором проходе с полным таймаутом.
+    site_timeout = timeout if screen_timeout is None else min(timeout, screen_timeout)
+
     def probe(t: tuple[str, str]) -> SiteResult:
         host, path = t
         # Цели-«советники» проверяем коротким таймаутом: они не решают вердикт, а
         # полный таймаут на них означал бы, что КАЖДЫЙ кандидат стоит лишние 4 с.
         if (host, path) in ADVISORY_TARGETS:
-            r = check_site(host, path, timeout=min(ADVISORY_TIMEOUT, timeout),
+            r = check_site(host, path, timeout=min(ADVISORY_TIMEOUT, site_timeout),
                            probe_freeze=probe_freeze)
             r.advisory = True
             return r
-        return check_site(host, path, timeout=timeout, probe_freeze=probe_freeze)
+        return check_site(host, path, timeout=site_timeout, probe_freeze=probe_freeze)
 
     # Цели проверяем параллельно — так один прогон занимает ~таймаут, а не сумму.
     with ThreadPoolExecutor(max_workers=len(tgts)) as ex:
@@ -434,6 +484,8 @@ def test_all(
     probe_freeze: bool = True,
     quick_voice: bool = False,
     skip_voice_if_sites_fail: bool = True,
+    screen_timeout: float | None = None,
+    check_voice_udp: bool = True,
 ) -> list[ServiceResult]:
     svcs = services or list(DEFAULT_TARGETS.keys())
     # Сервисы проверяем параллельно (один winws обслуживает оба) — прогон
@@ -442,7 +494,9 @@ def test_all(
         futures = [
             ex.submit(test_service, s, timeout=timeout, probe_freeze=probe_freeze,
                       quick_voice=quick_voice,
-                      skip_voice_if_sites_fail=skip_voice_if_sites_fail)
+                      skip_voice_if_sites_fail=skip_voice_if_sites_fail,
+                      screen_timeout=screen_timeout,
+                      check_voice_udp=check_voice_udp)
             for s in svcs
         ]
         return [f.result() for f in futures]

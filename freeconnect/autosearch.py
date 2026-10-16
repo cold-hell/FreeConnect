@@ -93,20 +93,44 @@ def evaluate_strategy(
     timeout: float = 5.0,
     settle: float = 4.0,
     probe_freeze: bool = True,
+    screen: bool = False,
+    screen_timeout: float = 1.2,
+    check_voice_udp: bool = True,
 ) -> StrategyScore:
-    """Поднимает одну стратегию и оценивает её."""
+    """Поднимает одну стратегию и оценивает её.
+
+    screen=True — быстрый проход для СИТА (первый этап перебора): пробы сайтов
+    идут с коротким лимитом (`screen_timeout`), голос не измеряется вовсе. Смысл:
+    при фильтрации провайдера проба возвращается ровно по лимиту (замерено 5.05 с),
+    поэтому сито на 5 секундах означает «каждый кандидат стоит 5 секунд». Выживших
+    потом перепроверяем полностью — см. search().
+    """
+    from . import tester
     sc = StrategyScore(strategy=strategy)
+    if screen:
+        # Сито: короткий лимит проб и без голоса (голос меряем только на выживших —
+        # при задушенном UDP он сам стоит до ~6 с и решает только для финальной оценки).
+        kwargs = {"timeout": screen_timeout, "probe_freeze": probe_freeze,
+                  "check_voice_udp": False}
+    else:
+        kwargs = {"timeout": timeout, "probe_freeze": probe_freeze,
+                  "check_voice_udp": check_voice_udp}
     try:
         engine.start(strategy, settle=settle)
     except EngineError as e:
         sc.error = str(e)
         return sc
     try:
-        sc.services = tester.test_all(services, timeout=timeout, probe_freeze=probe_freeze)
+        sc.services = tester.test_all(services, **kwargs)
     finally:
         engine.stop()
     _compute_score(sc, len(services))
     return sc
+
+
+def _screen_sort_key(sc: StrategyScore):
+    """Порядок для второго прохода: сперва те, у кого открылось больше целей."""
+    return (-sc.sites_ok, -sc.services_ok)
 
 
 def search(
@@ -121,42 +145,86 @@ def search(
     on_progress: ProgressCb | None = None,
     on_result: ResultCb | None = None,
     cancel: threading.Event | None = None,
+    screen_timeout: float = 0.9,
+    recheck_timeout: float = 2.5,
+    full_recheck: int = 3,
+    full_recheck_no_alive: int = 0,
+    on_recheck: ResultCb | None = None,
 ) -> list[StrategyScore]:
-    """Перебирает стратегии и возвращает список StrategyScore, отсортированный по оценке.
+    """Перебирает готовые стратегии в два прохода и возвращает список по оценке.
 
-    stop_on_first — остановиться на первой полностью рабочей (быстрый режим).
-    stop_after_all — 0 (по умолчанию) = перебрать ВСЕ стратегии и показать полный
-      список на выбор. >0 = остановиться, набрав столько All (быстрый, но урезанный
-      список — по фидбеку не нужен: юзер хочет ускорять саму проверку, а не резать
-      перебор). Оставлено параметром на случай «быстрого» режима.
+    Зачем два прохода. Длинный таймаут нужен только тем стратегиям, которые
+    что-то открывают; для «мёртвых» он превращается в чистую задержку. Замерено на
+    живой машине: при фильтрации каждая проба сайта возвращается ровно по лимиту
+    (5.05 с), поэтому проход по 22 наборам занимал ~110 с почти целиком из ожиданий.
+      этап A (сито): все наборы, короткий лимит, без голоса  -> единицы секунд;
+      этап B (точная оценка): выжившие, полный лимит, голос, задержка.
+    Итоговый список — по лучшей из двух оценок каждого набора.
+
+    stop_on_first / stop_after_all сохранены для совместимости: ими по-прежнему
+    можно прервать перебор раньше.
     """
     svcs = services or list(tester.DEFAULT_TARGETS.keys())
     strats = strategies if strategies is not None else load_strategies()
     eng = engine or Engine()
-    results: list[StrategyScore] = []
     total = len(strats)
-    all_ok_count = 0
+    cancelled = False
 
+    # ---------------------------------------------------------------- этап A: сито
+    screened: list[StrategyScore] = []
     try:
         for i, strat in enumerate(strats):
             if cancel is not None and cancel.is_set():
+                cancelled = True
                 break
             if on_progress:
                 on_progress(i, total, strat)
-            sc = evaluate_strategy(
-                eng, strat, svcs, timeout=timeout, settle=settle, probe_freeze=probe_freeze
-            )
-            results.append(sc)
+            sc = evaluate_strategy(eng, strat, svcs, timeout=timeout, settle=settle,
+                                   probe_freeze=probe_freeze, screen=True,
+                                   screen_timeout=screen_timeout)
+            screened.append(sc)
             if on_result:
                 on_result(sc)
             if stop_on_first and sc.working:
                 break
-            if sc.services_ok == len(svcs) and len(svcs) > 0:
-                all_ok_count += 1
-                if stop_after_all and all_ok_count >= stop_after_all:
-                    break
     finally:
         eng.stop()
 
+    # ------------------------------------------------- этап B: точная оценка выживших
+    final: dict[str, StrategyScore] = {sc.strategy.name: sc for sc in screened}
+    if not cancelled and full_recheck > 0:
+        def _decisive_ok(sc: StrategyScore) -> int:
+            """Открылось ли ХОТЬ ЧТО-ТО решающее (советники не в счёт)."""
+            return sum(1 for s in sc.services for x in s.sites if x.ok and not x.advisory)
+
+        alive = [sc for sc in screened if not sc.error and _decisive_ok(sc) > 0]
+        # Сито вообще ничего не открыло? Тогда точная оценка почти наверняка не
+        # поможет: у «мертвяков» тот же TLS-таймаут, только в 5 раз длиннее. По
+        # умолчанию второй проход в этом случае не запускаем — пользователю важнее
+        # быстро получить ответ «ни один набор не подошёл», чем ждать ещё минуту.
+        if not alive:
+            alive = sorted([sc for sc in screened if not sc.error],
+                           key=_screen_sort_key)[:full_recheck_no_alive]
+        for sc in sorted(alive, key=_screen_sort_key)[:full_recheck]:
+            if cancel is not None and cancel.is_set():
+                cancelled = True
+                break
+            try:
+                full = evaluate_strategy(
+                    eng, sc.strategy, svcs,
+                    # Полный проход в 2.5 с, а не 5: это втрое больше сита и уже
+                    # покрывает медленные, но рабочие соединения; пятисекундное
+                    # ожидание на «мёртвой» цели только удлиняло финальную оценку.
+                    timeout=min(timeout, recheck_timeout), settle=settle,
+                    probe_freeze=probe_freeze,
+                    check_voice_udp=any(s.service in tester.VOICE_SERVICES for s in sc.services),
+                )
+            except Exception:  # noqa: BLE001
+                continue
+            final[sc.strategy.name] = full
+            if on_recheck:
+                on_recheck(full)
+
+    results = list(final.values())
     results.sort(key=lambda s: s.score, reverse=True)
     return results

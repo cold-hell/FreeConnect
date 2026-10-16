@@ -1946,12 +1946,23 @@ class Api:
         # На время поиска гасим мониторы/обход.
         self._stop_monitors()
         counter = {"i": 0}
+        timing = {"last": time.perf_counter(), "phase": "сито"}
 
         def on_progress(i, total, strat):
             counter["i"] = i
             self._push("onSearchProgress", i, total, strat.name)
 
+        def _log_timing(sc: StrategyScore, phase: str) -> None:
+            """Время на стратегию — в лог. Без него «подбор медленный» не разобрать:
+            раньше автоподбор вообще не писал в debug.log ни одной строки."""
+            now = time.perf_counter()
+            dt = now - timing["last"]
+            timing["last"] = now
+            _log(f"AUTO [{phase}] {sc.strategy.name}: {dt:.1f}с | {sc.summary()}"
+                 + (f" | ошибка: {sc.error}" if sc.error else ""))
+
         def on_result(sc: StrategyScore):
+            _log_timing(sc, timing["phase"])
             item = _score_to_item(sc)
             i = counter["i"]
             total = len(load_strategies())
@@ -1963,14 +1974,29 @@ class Api:
             if sc.working or item["discord_sites_ok"]:
                 self._push("onSearchFound", item)
 
+        def on_recheck(sc: StrategyScore):
+            """Точная оценка выжившего (этап B): обновляем карточку в списке."""
+            timing["phase"] = "точная оценка"
+            _log_timing(sc, "точная оценка")
+            item = _score_to_item(sc)
+            if sc.working or item["discord_sites_ok"]:
+                self._push("onSearchFound", item)
+
+        started = time.perf_counter()
         try:
+            _log("=== AUTO SEARCH start (этап A: сито, короткий лимит) ===")
             results = search(
                 engine=self.engine,
                 on_progress=on_progress,
                 on_result=on_result,
+                on_recheck=on_recheck,
                 cancel=self._cancel,
             )
+            _log(f"=== AUTO SEARCH done: {len(results)} наборов за "
+                 f"{time.perf_counter() - started:.1f}с, "
+                 f"рабочих={sum(1 for r in results if r.working)} ===")
         except Exception as e:  # noqa: BLE001
+            _log(f"AUTO SEARCH failed: {e}")
             self._push("onError", f"Ошибка поиска: {e}")
             results = []
 
