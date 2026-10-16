@@ -28,10 +28,18 @@ class StrategyScore:
     score: float = 0.0
     working: bool = False
     error: str = ""
+    decisive_ok: int = 0     # сколько решающих целей открылось (для порядка и отчёта)
+    decisive_total: int = 0  # сколько их всего было
+    complete: bool = False   # ВСЕ решающие цели открылись (strict: «сервис реально открыт»)
 
     @property
     def services_ok(self) -> int:
         return sum(1 for s in self.services if s.ok)
+
+    @property
+    def services_complete(self) -> int:
+        """Сколько сервисов открылись ПОЛНОСТЬЮ (все решающие цели)."""
+        return sum(1 for s in self.services if s.complete)
 
     @property
     def sites_ok(self) -> int:
@@ -73,17 +81,26 @@ ResultCb = Callable[[StrategyScore], None]
 
 
 def _compute_score(sc: StrategyScore, n_services: int) -> None:
-    # «Рабочая» = прошёл ХОТЯ БЫ ОДИН целевой сервис полностью (для Discord —
-    # обязательно с живым голосом/медиа). Такую стратегию есть смысл сохранить;
-    # универсальные (все сервисы) стоят выше за счёт services_ok в оценке.
+    # «Рабочая» = прошёл ХОТЯ БЫ ОДИН целевой сервис (для Discord — обязательно с
+    # живым голосом/медиа). Такую стратегию есть смысл СОХРАНИТЬ в список.
     sc.working = sc.services_ok > 0
+    # «Полностью рабочая» = ВСЕ решающие цели каждого сервиса ответили. Это отдельный,
+    # более строгий критерий: он решает, можно ли ВКЛЮЧАТЬ обход автоматически.
+    # Разбор жалобы: автоподбор авто-включил набор с 2 из 3 сайтов Discord, а Discord
+    # у человека не работал вовсе — половина целей ещё не означает рабочий сервис.
+    sc.decisive_ok = sum(s.decisive_ok for s in sc.services)
+    sc.decisive_total = sum(s.decisive_total for s in sc.services)
+    sc.complete = any(s.complete for s in sc.services)
     lat = sc.avg_latency_ms
     lat_penalty = (lat / 10.0) if lat >= 0 else 100.0
     # Штраф за качество голоса: среди равных (напр. двух All) выше встанет та, что
     # коннектится к войсу быстрее/стабильнее (меньше потерь/джиттера/RTT). Всегда
     # меньше разрыва между All и Discord-only (services_ok*1000), порядок не ломает.
     voice_penalty = sum(s.voice_score() for s in sc.services)
-    sc.score = sc.services_ok * 1000 + sc.sites_ok * 100 - lat_penalty - voice_penalty
+    # Полностью открытые сервисы весят больше частично открытых: +50 «половин» не
+    # должны перевешивать один сервис, открытый целиком.
+    sc.score = (sc.services_ok * 1000 + sc.services_complete * 500
+                + sc.sites_ok * 100 - lat_penalty - voice_penalty)
 
 
 def evaluate_strategy(
@@ -226,5 +243,7 @@ def search(
                 on_recheck(full)
 
     results = list(final.values())
-    results.sort(key=lambda s: s.score, reverse=True)
+    # Порядок: сперва те, где сервис открыт ЦЕЛИКОМ (иначе «2 из 3 сайтов Discord»
+    # поднимались выше реально рабочих наборов), затем по оценке.
+    results.sort(key=lambda s: (s.services_complete, s.score), reverse=True)
     return results

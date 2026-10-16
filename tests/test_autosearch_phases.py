@@ -161,5 +161,68 @@ class TestTwoPhaseSearch(unittest.TestCase):
         self.assertEqual(calls, [], "после отмены не должно быть ни одного запуска")
 
 
+class TestCompleteCriteria(unittest.TestCase):
+    """Строгий критерий «сервис открыт целиком» против «подаёт признаки жизни».
+
+    Разбор жалобы владельца: автоподбор авто-включил набор, где открылись 2 из 3
+    сайтов Discord, а Discord у него не работал вовсе. Теперь включение требует,
+    чтобы ответили ВСЕ решающие цели сервиса.
+    """
+
+    def _service(self, n_ok: int, total: int = 3, advisory: int = 0,
+                 voice: bool = True) -> ServiceResult:
+        sites = [SiteResult(host=f"d{i}", ok=i < n_ok, status="OK" if i < n_ok else "TIMEOUT")
+                 for i in range(total)]
+        for j in range(advisory):
+            sites.append(SiteResult(host=f"adv{j}", ok=False, status="TIMEOUT", advisory=True))
+        return ServiceResult(service="discord", sites=sites, voice_ok=voice,
+                             voice_conf="high" if voice else "")
+
+    def test_complete_needs_all_decisive_sites(self):
+        self.assertTrue(self._service(3).complete)
+        self.assertFalse(self._service(2).complete, "2 из 3 — ещё не рабочий Discord")
+        self.assertFalse(self._service(1).complete)
+        self.assertFalse(self._service(0).complete)
+
+    def test_sites_ok_still_lenient_for_saving(self):
+        """Частичный набор всё равно сохраняем в список — решение о включении отдельно."""
+        self.assertTrue(self._service(2).sites_ok)
+        self.assertTrue(self._service(2).ok)
+
+    def test_advisory_target_does_not_block_complete(self):
+        svc = self._service(3, advisory=1)
+        self.assertTrue(svc.complete, "советник не должен мешать признать сервис открытым")
+        self.assertEqual(svc.decisive_total, 3)
+
+    def test_voice_marks_service_not_ok_but_complete_stays_site_truth(self):
+        """complete — про сайты; голос влияет на ok, а не на полноту сайтов."""
+        svc = self._service(3, voice=False)
+        self.assertTrue(svc.complete)
+        self.assertFalse(svc.ok, "без голоса Discord не считается полностью рабочим")
+
+
+class TestRankingPrefersComplete(unittest.TestCase):
+    def _score(self, name: str, n_ok: int) -> autosearch.StrategyScore:
+        strategy = Strategy(id=name, name=name, source_bat="x.bat",
+                            args=["--filter-tcp=443", "--dpi-desync=fake"])
+        sites = [SiteResult(host=f"d{i}", ok=i < n_ok, status="OK" if i < n_ok else "TIMEOUT")
+                 for i in range(3)]
+        disc = ServiceResult(service="discord", sites=sites, voice_ok=True, voice_conf="high")
+        sc = autosearch.StrategyScore(strategy=strategy, services=[disc])
+        autosearch._compute_score(sc, 1)
+        return sc
+
+    def test_complete_outranks_partial(self):
+        partial, full = self._score("PART", 2), self._score("FULL", 3)
+        res = sorted([partial, full],
+                     key=lambda s: (s.services_complete, s.score), reverse=True)
+        self.assertEqual(res[0].strategy.name, "FULL")
+
+    def test_complete_flag_comes_from_sites(self):
+        self.assertTrue(self._score("FULL", 3).complete)
+        self.assertFalse(self._score("PART", 2).complete)
+
+
 if __name__ == "__main__":
     unittest.main()
+

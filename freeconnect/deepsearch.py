@@ -419,6 +419,7 @@ def deep_search(
     results: list[StrategyScore] = []
     found_discord = 0
     found_all_high = 0
+    found_complete = 0
     yt_only_saved = 0
     dead_run = 0
     total = len(candidates)
@@ -458,6 +459,8 @@ def deep_search(
                     found_discord += 1
                 if all_ok_high:
                     found_all_high += 1
+                if sc.complete:
+                    found_complete += 1
                 if on_found:
                     on_found(saved, sc)
             if on_result:

@@ -101,9 +101,22 @@ class ServiceResult:
     def sites_ok(self) -> bool:
         # Половина РЕШАЮЩИХ целей (округл. вверх) должна открыться. Цели-«советники»
         # (advisory) в порог не входят: их вердикт показывается, но не решает.
+        # Это порог «сервис подаёт признаки жизни» — для сита и частичного счёта.
         decisive = [s for s in self.sites if not s.advisory]
         good = sum(1 for s in decisive if s.ok)
         return good >= (len(decisive) + 1) // 2
+
+    @property
+    def complete(self) -> bool:
+        """Сервис открылся ПОЛНОСТЬЮ: все решающие цели ответили.
+
+        Отдельный (более строгий) критерий нужен там, где решается «включать обход
+        этому пользователю»: половина целей — это ещё не рабочий сервис. Разбор
+        жалобы: автоподбор авто-включил набор с 2 из 3 сайтов Discord, а у человека
+        Discord не работал вовсе (половина целей проходила, gateway — нет).
+        """
+        decisive = [s for s in self.sites if not s.advisory]
+        return bool(decisive) and all(s.ok for s in decisive)
 
     @property
     def ok(self) -> bool:
@@ -111,6 +124,15 @@ class ServiceResult:
         if self.voice_ok is None:
             return self.sites_ok
         return self.sites_ok and self.voice_ok
+
+    @property
+    def decisive_ok(self) -> int:
+        """Сколько РЕШАЮЩИХ целей открылось (советники не в счёт)."""
+        return sum(1 for s in self.sites if s.ok and not s.advisory)
+
+    @property
+    def decisive_total(self) -> int:
+        return sum(1 for s in self.sites if not s.advisory)
 
     @property
     def avg_latency_ms(self) -> float:

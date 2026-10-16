@@ -230,6 +230,9 @@ def _score_to_item(sc: StrategyScore) -> dict:
         "discord_ok": bool(disc.ok) if disc else False,
         "youtube_ok": bool(yt.ok) if yt else False,
         "discord_sites_ok": bool(disc.sites_ok) if disc else False,
+        # complete — сервис открылся ЦЕЛИКОМ (все решающие цели). Нужно интерфейсу и
+        # авто-подключению: «2 из 3 сайтов Discord» не значит рабочий Discord.
+        "complete": bool(any(s.complete for s in sc.services)),
         "latency": round(lat) if lat >= 0 else None,
         "working": sc.working,
         "custom": is_custom,
@@ -365,7 +368,12 @@ class Api:
         """Ранг стратегии для авто-выбора: оба сервиса=3 > только Discord=2 >
         только YouTube=1 > прочее=0. Для своих стратегий Discord-«живость» берём
         из голос-валидированной метки в имени (All/Discord) + защита от битых
-        данных (сайты>0); для встроенных — по числу открытых сайтов."""
+        данных (сайты>0); для встроенных — по числу открытых сайтов.
+
+        Важно: ранг намеренно НЕ учитывает `complete`. Он сортирует СПИСОК (кто
+        выше), а решение «включать обход автоматически» принимается отдельно и
+        требует полного открытия сервиса — см. _run_search/_run_deep.
+        """
         name = w.get("name", "") or ""
         d = w.get("discord", 0) or 0
         y = w.get("youtube", 0) or 0
@@ -380,15 +388,22 @@ class Api:
 
     def _best_strategy_name(self) -> str | None:
         """Лучшая стратегия для авто-подключения — работает и для Discord, и для
-        YouTube. Если текущая сохранённая уже в топе — не трогаем её."""
+        YouTube. Если текущая сохранённая уже в топе — не трогаем её.
+
+        Сначала предпочитаем наборы, где сервис открылся ЦЕЛИКОМ (`complete`): именно
+        из-за отсутствия этого различия авто-подключение могло выбрать набор с 2 из 3
+        сайтов Discord, когда рядом стоял полностью рабочий.
+        """
         cands = [w for w in self.working if w.get("name")]
         if not cands:
             return self.strategy_name
         best_rank = max(self._strategy_rank(w) for w in cands)
-        top = [w["name"] for w in cands if self._strategy_rank(w) == best_rank]
-        if self.strategy_name in top:
+        top = [w for w in cands if self._strategy_rank(w) == best_rank]
+        full = [w for w in top if w.get("complete")]
+        pool = full or top
+        if self.strategy_name in {w["name"] for w in pool}:
             return self.strategy_name
-        return top[0]
+        return pool[0]["name"]
 
     def _state(self) -> dict:
         # В список подмешиваем свои стратегии (FreeConnect #N) — они всегда доступны.
@@ -1805,9 +1820,17 @@ class Api:
         if working and not cancelled:
             # Полный проход завершён: working отсортирован по баллу (services_ok, затем
             # качество голоса) — working[0] это лучшая All с быстрым/стабильным голосом.
-            self.strategy_name = working[0]["name"]
-            self._save()
-            self.enable()
+            # Авто-включаем только если сервис открыт ЦЕЛИКОМ: «2 из 3 сайтов Discord»
+            # ещё не значит рабочий Discord (жалоба владельца). Иначе просто сохраняем
+            # найденное и оставляем выбор человеку.
+            if working[0].get("complete"):
+                self.strategy_name = working[0]["name"]
+                self._save()
+                self.enable()
+            else:
+                _log("DEEP SEARCH: найденные наборы не открывают сервис целиком — "
+                     "не включаю автоматически, оставляю выбор пользователю")
+                self._save()
         else:
             # «Стоп»: сохраняем найденное в списке, но НЕ трогаем активную стратегию —
             # иначе ранняя остановка после одной YouTube-only перекидывала на неё
@@ -1953,12 +1976,15 @@ class Api:
             self._push("onSearchProgress", i, total, strat.name)
 
         def _log_timing(sc: StrategyScore, phase: str) -> None:
-            """Время на стратегию — в лог. Без него «подбор медленный» не разобрать:
-            раньше автоподбор вообще не писал в debug.log ни одной строки."""
+            """Время и ИТОГ по каждому набору — в лог. Без этого «подбор медленный» и
+            «подобрались наборы без Discord» не разобрать: раньше автоподбор вообще не
+            писал в debug.log ни одной строки."""
             now = time.perf_counter()
             dt = now - timing["last"]
             timing["last"] = now
             _log(f"AUTO [{phase}] {sc.strategy.name}: {dt:.1f}с | {sc.summary()}"
+                 + (f" | целиком: {sc.decisive_ok}/{sc.decisive_total}"
+                    if sc.decisive_total else "")
                  + (f" | ошибка: {sc.error}" if sc.error else ""))
 
         def on_result(sc: StrategyScore):
@@ -2006,13 +2032,21 @@ class Api:
         # руками (кейс ALT9): наш UDP-замер голоса косвенный и может ошибиться в минус.
         offerable = [it for it in items if _is_offerable(it)]
         self.working = offerable
-        # Авто-включаем только строго проверенную лучшую (голос подтверждён); если такой
-        # нет — не навязываем, показываем список, юзер выберет (напр. тот же ALT9).
-        working = [it for it in offerable if it["working"]]
+        # Авто-включаем ТОЛЬКО если хотя бы один сервис открылся ЦЕЛИКОМ (все решающие
+        # цели ответили). Разбор жалобы: набор с 2 из 3 сайтов Discord включался
+        # автоматически, а Discord у человека не работал. Лучше показать список и не
+        # трогать текущий обход, чем включить заведомо частичный.
+        complete_ok = any(getattr(r, "complete", False) for r in results)
+        working = [it for it in offerable if it["working"]] if complete_ok else []
         if working:
             self.strategy_name = working[0]["name"]
             self._save()
             self.enable()
+        elif offerable:
+            reason = ("Ни один набор не открыл сервис целиком — обход не включаю "
+                      "автоматически. Проверь варианты в списке и выбери вручную.")
+            _log("AUTO SEARCH: " + reason)
+            self._push("onSearchNote", reason)
         self._searching = False
         self._push("onSearchDone", offerable)
 
