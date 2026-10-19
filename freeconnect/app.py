@@ -56,6 +56,8 @@ def _provision_runtime() -> None:
         # но ДОКИДЫВАЕМ новые файлы бандла (напр. sing-box.exe для VPN), иначе фича
         # не появится у тех, кто ставит апдейт поверх готового C:\FreeConnect\runtime.
         _provision_missing(src)
+        # И чиним битые «фейки»: они могут существовать, но быть не тем протоколом.
+        _heal_payloads(src)
         _ensure_strategy_blobs()
         return
     if not src.is_dir():
@@ -74,6 +76,7 @@ def _provision_runtime() -> None:
         except Exception as e:  # noqa: BLE001
             _log(f"provision copy failed {item.name}: {e}")
     _log(f"runtime provisioned -> {paths.RUNTIME_DIR} (ready={paths.runtime_ready()})")
+    _heal_payloads(src)
     _ensure_strategy_blobs()
 
 
@@ -110,6 +113,46 @@ def _provision_missing(src: Path) -> None:
                 _log(f"provision: докинут {rel / name}")
             except Exception as e:  # noqa: BLE001
                 _log(f"provision add failed {name}: {e}")
+
+
+def _heal_payloads(src: Path) -> None:
+    """Синхронизирует «фейки» (пакеты-обманки) с бандлом.
+
+    Почему отдельно от _provision_missing: тот только ДОКИДЫВАЕТ отсутствующие
+    файлы. А здесь файл может существовать и быть не тем: у нас ACTIVE_GAME_UDP.bin
+    оказался копией пакета Discord, stun2.bin — QUIC-пакетом вместо STUN. winws при
+    этом запускается и «работает», но обманка не выглядит как трафик игры, и обход
+    тихо не действует — именно так не работал игровой фильтр на европейских серверах
+    FACEIT.
+
+    Проверять «формат» недостаточно: копия пакета Discord — тоже валидный QUIC,
+    поэтому старая версия этой функции такой файл пропускала. Правильное правило:
+    для `bin/*.bin` источник правды — бандл приложения (файлы из релиза апстрима),
+    а сетевую досинхронизацию с upstream делает strategy_update.sync_fake_payloads.
+    """
+    bin_src = src / "bin"
+    if not bin_src.is_dir():
+        return
+    import shutil
+    updated = 0
+    for f in sorted(bin_src.glob("*.bin")):
+        dst = paths.BIN_DIR / f.name
+        try:
+            src_data = f.read_bytes()
+            cur = dst.read_bytes() if dst.is_file() else b""
+        except OSError:
+            continue
+        if cur == src_data:
+            continue
+        try:
+            paths.BIN_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(f, dst)
+            updated += 1
+            _log(f"provision: фейк синхронизирован с бандлом — {f.name}")
+        except Exception as e:  # noqa: BLE001
+            _log(f"provision heal failed {f.name}: {e}")
+    if updated:
+        _log(f"provision: обновлено фейковых пакетов: {updated}")
 
 
 def _sanitize_lists() -> None:

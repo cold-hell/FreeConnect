@@ -122,6 +122,77 @@ def _fetch_bat(name: str, timeout: float = 15.0, attempts: int = 3) -> str:
     raise last if last else RuntimeError("fetch failed")
 
 
+def _valid_payload(name: str, data: bytes) -> bool:
+    """Похож ли файл на настоящий «фейк» нужного вида.
+
+    Проверка формата, а не содержимого: обманка обязана выглядеть как реальный
+    протокол, иначе DPI её не примет за «свой» пакет. Именно из-за битых заглушек
+    (у нас ACTIVE_GAME_UDP был копией файла Discord, а stun2 — QUIC вместо STUN)
+    игровой обход не работал: фейк уходил, но не был похож на игру.
+    """
+    if len(data) < 32:
+        return False
+    if name.endswith("_UDP.bin") or name.startswith("quic_initial"):
+        # QUIC long header: старшие два бита первого байта = 11. Версию строго не
+        # проверяем: в наборе есть и QUIC v1 (0x00000001), и v2 (0x6b3343cf) —
+        # оба настоящие, и оба годятся в обманку.
+        return (data[0] & 0xC0) == 0xC0
+    if name.startswith("stun"):
+        # STUN Binding Request: 0x0001 + magic cookie 0x2112A442.
+        return data[0:2] == b"\x00\x01" and data[4:8] == b"\x21\x12\xa4\x42"
+    if name.startswith("tls_clienthello"):
+        # TLS handshake record: 0x16 0x03 xx.
+        return data[0] == 0x16 and data[1] == 0x03
+    return True
+
+
+def sync_fake_payloads(log=None, timeout: float = 10.0) -> int:
+    """Обновляет «фейки» (пакеты-обманки) по списку ссылок стратегий.
+
+    Зачем отдельный проход: стратегии ссылаются на файлы из `bin/`, и если у нас
+    лежит битая заглушка (или её нет), winws формально работает, но обманка не
+    похожа на реальный протокол — обход «тихо не работает». Файл перезаписываем
+    только если скачался валидный пакет нужного формата.
+    """
+    log = log or (lambda *_: None)
+    from .strategies import _referenced_blobs
+    custom_json = paths.APP_HOME / "custom_strategies.json"
+    names = sorted(_referenced_blobs(paths.STRATEGIES_JSON, custom_json))
+    if not names:
+        return 0
+    if not paths.BIN_DIR.is_dir():
+        try:
+            paths.BIN_DIR.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return 0
+
+    def _one(name: str) -> bool:
+        url = f"{RAW_BASE}/bin/{urllib.parse.quote(name)}"
+        try:
+            req = urllib.request.Request(url, headers=_UA)
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                data = r.read(256 * 1024)
+        except Exception:  # noqa: BLE001
+            return False
+        if not _valid_payload(name, data):
+            log(f"payload {name}: формат не распознан — не перезаписываю")
+            return False
+        try:
+            (paths.BIN_DIR / name).write_bytes(data)
+            return True
+        except OSError:
+            return False
+
+    from concurrent.futures import ThreadPoolExecutor
+    made = 0
+    with ThreadPoolExecutor(max_workers=min(8, len(names))) as ex:
+        for ok in ex.map(_one, names):
+            made += 1 if ok else 0
+    if made:
+        log(f"фейковые пакеты обновлены: {made} из {len(names)}")
+    return made
+
+
 def update_from_upstream(min_ok: int = 10, timeout: float = 12.0) -> tuple[int, str]:
     """Скачивает и перезаписывает strategies.json. Возвращает (кол-во, ошибка).
 
@@ -157,8 +228,15 @@ def update_from_upstream(min_ok: int = 10, timeout: float = 12.0) -> tuple[int, 
         tmp.replace(paths.STRATEGIES_JSON)  # атомарная замена
     except Exception as e:  # noqa: BLE001
         return 0, f"запись не удалась: {e}"
+    # Обновляем сами «фейки» (пакеты-обманки: QUIC initial, TLS ClientHello, STUN).
+    # Без этого набор стратегий и пакеты расходятся, и обход тихо перестаёт работать.
+    try:
+        sync_fake_payloads(log=None)
+    except Exception:  # noqa: BLE001
+        pass
     # Апстрим ссылается на блобы, которых у нас нет (живой захват ACTIVE_*.bin, stun2 и
-    # пр.) — иначе winws упадёт на всех новых стратегиях. Докидываем фолбэк-копии.
+    # пр.) — иначе winws упадёт на всех новых стратегиях. Докидываем фолбэк-копии для
+    # того, что не удалось скачать по-настоящему.
     try:
         from .strategies import ensure_referenced_blobs
         ensure_referenced_blobs()
